@@ -141,6 +141,8 @@ PUBLIC_URL="${PUBLIC_URL:-http://$(hostname -f 2>/dev/null || hostname)}"
 PUBLIC_DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -e 's|^https\?://||' -e 's|/.*||' -e 's|:.*||')
 HOST_TZ="America/New_York"
 
+JVB_AUTH_PASSWORD="$(randpass)"
+JICOFO_AUTH_PASSWORD="$(randpass)"
 # Load existing .env if present (allows re-run to preserve settings)
 # Skip if in remove mode to avoid parse errors
 # Note: We parse it carefully since docker-compose .env format differs from shell
