@@ -108,8 +108,8 @@ JITSI_DATA_DIR="$JITSI_BASE_DIR/.data"
 CREDS_FILE="$JITSI_BASE_DIR/credentials.txt"
 BACKUP_DIR="$JITSI_BASE_DIR/.backup"
 PUBLIC_URL="${PUBLIC_URL:-http://$(hostname -f 2>/dev/null || hostname)}"
-# Extract domain from PUBLIC_URL (strip protocol)
-XMPP_DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -e 's|^https\?://||' -e 's|/.*||' -e 's|:.*||')
+# Extract domain from PUBLIC_URL (strip protocol) - used for auth, email, display
+PUBLIC_DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -e 's|^https\?://||' -e 's|/.*||' -e 's|:.*||')
 HOST_TZ="America/New_York"
 
 # Load existing .env if present (allows re-run to preserve settings)
@@ -311,9 +311,8 @@ TZ=$TZ
 ENABLE_AUTH=$ENABLE_AUTH
 ENABLE_GUESTS=1
 AUTH_TYPE=$AUTH_TYPE
-XMPP_DOMAIN=meet.$XMPP_DOMAIN
-XMPP_AUTH_DOMAIN=$XMPP_DOMAIN
-XMPP_GUEST_DOMAIN=guest.$XMPP_DOMAIN
+# Public domain for user-facing display
+PUBLIC_DOMAIN=$PUBLIC_DOMAIN
 
 # Component creds (autofilled if empty on first run)
 JICOFO_AUTH_USER=focus
@@ -328,7 +327,7 @@ JVB_TCP_HARVESTER_DISABLED=true
 # SMTP via host
 SMTP_SERVER=${SMTP_SERVER:-$SMTP_SERVER_DEFAULT}
 SMTP_PORT=${SMTP_PORT:-$SMTP_PORT_DEFAULT}
-SMTP_FROM=${SMTP_FROM:-"no-reply@$(hostname -f 2>/dev/null || hostname)"}
+SMTP_FROM=${SMTP_FROM:-"noreply@$PUBLIC_DOMAIN"}
 SMTP_USERNAME=${SMTP_USERNAME:-}
 SMTP_PASSWORD=${SMTP_PASSWORD:-}
 SMTP_TLS=${SMTP_TLS:-0}
@@ -399,9 +398,9 @@ services:
     volumes:
       - ${CONFIG}/prosody:/config:Z
     environment:
-      - XMPP_DOMAIN=${XMPP_DOMAIN}
-      - XMPP_AUTH_DOMAIN=${XMPP_AUTH_DOMAIN}
-      - XMPP_GUEST_DOMAIN=${XMPP_GUEST_DOMAIN}
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_GUEST_DOMAIN=guest.meet.jitsi
       - ENABLE_AUTH=${ENABLE_AUTH}
       - AUTH_TYPE=${AUTH_TYPE}
       - ENABLE_GUESTS=${ENABLE_GUESTS}
@@ -413,7 +412,7 @@ services:
     networks:
       meet:
         aliases:
-          - xmpp.${XMPP_DOMAIN}
+          - xmpp.meet.jitsi
 
   # Focus (Jicofo)
   jicofo:
@@ -424,12 +423,12 @@ services:
     volumes:
       - ${CONFIG}/jicofo:/config:Z
     environment:
-      - XMPP_DOMAIN=${XMPP_DOMAIN}
-      - XMPP_AUTH_DOMAIN=${XMPP_AUTH_DOMAIN}
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
       - JICOFO_AUTH_USER=${JICOFO_AUTH_USER}
       - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
       - ENABLE_AUTH=${ENABLE_AUTH}
-      - XMPP_SERVER=xmpp.${XMPP_DOMAIN}
+      - XMPP_SERVER=xmpp.meet.jitsi
     networks: [ meet ]
 
   # Videobridge
@@ -443,12 +442,12 @@ services:
     volumes:
       - ${CONFIG}/jvb:/config:Z
     environment:
-      - XMPP_AUTH_DOMAIN=${XMPP_AUTH_DOMAIN}
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
       - JVB_AUTH_USER=${JVB_AUTH_USER}
       - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
       - JVB_UDP_PORT=${JVB_UDP_PORT}
       - JVB_TCP_HARVESTER_DISABLED=${JVB_TCP_HARVESTER_DISABLED}
-      - XMPP_SERVER=xmpp.${XMPP_DOMAIN}
+      - XMPP_SERVER=xmpp.meet.jitsi
     networks: [ meet ]
 
   # Web (no TLS here; reverse proxy handles it)
@@ -465,9 +464,9 @@ services:
       - ENABLE_LETSENCRYPT=0
       - ENABLE_HTTP_REDIRECT=0
       - PUBLIC_URL=${PUBLIC_URL}
-      - XMPP_DOMAIN=${XMPP_DOMAIN}
-      - XMPP_AUTH_DOMAIN=${XMPP_AUTH_DOMAIN}
-      - XMPP_GUEST_DOMAIN=${XMPP_GUEST_DOMAIN}
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_GUEST_DOMAIN=guest.meet.jitsi
       - ENABLE_AUTH=${ENABLE_AUTH}
       - ENABLE_GUESTS=${ENABLE_GUESTS}
       - SMTP_SERVER=${SMTP_SERVER}
@@ -477,7 +476,7 @@ services:
       - SMTP_PASSWORD=${SMTP_PASSWORD}
       - SMTP_TLS=${SMTP_TLS}
       - SMTP_STARTTLS=${SMTP_STARTTLS}
-      - XMPP_SERVER=xmpp.${XMPP_DOMAIN}
+      - XMPP_SERVER=xmpp.meet.jitsi
     networks: [ meet ]
 
 networks:
@@ -521,13 +520,13 @@ wait_for_prosody() {
 
 register_admin_user() {
 	. "$ENV_FILE"
-	# We register in the auth domain if auth is enabled; otherwise register in XMPP_DOMAIN
-	domain="$XMPP_DOMAIN"
+	# We register in the auth domain if auth is enabled; otherwise register in main XMPP domain
+	domain="meet.jitsi"
 	if [ "${ENABLE_AUTH:-0}" = "1" ]; then
-		domain="$XMPP_AUTH_DOMAIN"
+		domain="auth.meet.jitsi"
 	fi
 
-	info "Ensuring admin user '${ADMIN_USER}@${domain}' exists..."
+	info "Ensuring admin user '${ADMIN_USER}@${PUBLIC_DOMAIN}' exists..."
 	# Try to detect existing user by attempting to set password; if it fails, register.
 	if docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua passwd "$ADMIN_USER" "$domain" "$ADMIN_PASS" >/dev/null 2>&1; then
 		info "Updated password for ${ADMIN_USER}@${domain}"
@@ -539,7 +538,7 @@ register_admin_user() {
 	umask 077
 	{
 		echo "ADMIN_USER=$ADMIN_USER"
-		echo "ADMIN_DOMAIN=$domain"
+		echo "ADMIN_DOMAIN=$PUBLIC_DOMAIN"
 		echo "ADMIN_PASS=$ADMIN_PASS"
 		echo "UPDATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 	} >"$CREDS_FILE"
@@ -555,7 +554,7 @@ Jitsi Meet is up.
 Reverse proxy target (HTTP): 127.0.0.1:${HTTP_PORT}
 Public URL (for clients):   ${PUBLIC_URL}
 Auth enabled:               ${ENABLE_AUTH} (0=anyone can create rooms)
-Admin user:                 ${ADMIN_USER}@$([ "$ENABLE_AUTH" = "1" ] && printf %s "$XMPP_AUTH_DOMAIN" || printf %s "$XMPP_DOMAIN")
+Admin user:                 ${ADMIN_USER}@${PUBLIC_DOMAIN}
 Admin password:             (stored in $CREDS_FILE)
 SMTP relay:                 ${SMTP_SERVER}:${SMTP_PORT} (from ${SMTP_FROM})
 Images tag:                 ${JITSI_TAG}
