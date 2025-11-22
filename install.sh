@@ -135,6 +135,8 @@ SMTP_SERVER_DEFAULT="host.docker.internal"
 SMTP_PORT_DEFAULT="25"
 # Docker image tags (can be overridden)
 JITSI_TAG="${JITSI_TAG:-unstable}"
+# Jibri (recording/streaming) - disabled by default
+ENABLE_JIBRI="${ENABLE_JIBRI:-0}"
 # -----------------------------------
 
 umask 022
@@ -166,6 +168,32 @@ randpass() {
 		openssl rand -base64 36 | tr -dc 'A-Za-z0-9' | head -c 24
 	else
 		dd if=/dev/urandom bs=1 count=48 2>/dev/null | od -An -tx1 | tr -dc 'A-Za-z0-9' | head -c 24
+	fi
+}
+
+check_jibri_prereqs() {
+	# Jibri requires snd-aloop kernel module
+	if [ "${ENABLE_JIBRI:-0}" = "1" ]; then
+		info "Checking Jibri prerequisites..."
+
+		# Check for snd-aloop module
+		if ! lsmod | grep -q snd_aloop; then
+			warn "ALSA loopback module (snd-aloop) not loaded."
+			info "Attempting to load snd-aloop..."
+			modprobe snd-aloop || warn "Could not load snd-aloop. Recording may not work."
+
+			# Try to make it persistent
+			if [ -d /etc/modules-load.d ]; then
+				echo "snd-aloop" > /etc/modules-load.d/jibri.conf
+				info "Added snd-aloop to /etc/modules-load.d/jibri.conf"
+			fi
+		else
+			info "snd-aloop module is loaded."
+		fi
+
+		# Create recordings directory
+		mkdir -p "${JITSI_DATA_DIR}/recordings"
+		chmod 777 "${JITSI_DATA_DIR}/recordings"
 	fi
 }
 
@@ -337,9 +365,9 @@ SMTP_STARTTLS=${SMTP_STARTTLS:-0}
 JITSI_IMAGE_TAG=$JITSI_TAG
 
 # Branding (customize these)
-APP_NAME=${APP_NAME:-Jitsi Meet}
-NATIVE_APP_NAME=${NATIVE_APP_NAME:-Jitsi Meet}
-PROVIDER_NAME=${PROVIDER_NAME:-Jitsi}
+APP_NAME=${APP_NAME:-CasjaysDev Meet}
+PROVIDER_NAME=${PROVIDER_NAME:-CasjaysDev}
+NATIVE_APP_NAME=${NATIVE_APP_NAME:-$APP_NAME}
 DEFAULT_LANGUAGE=${DEFAULT_LANGUAGE:-en}
 
 # Features
@@ -350,6 +378,13 @@ ENABLE_CLOSE_PAGE=${ENABLE_CLOSE_PAGE:-false}
 DISABLE_AUDIO_LEVELS=${DISABLE_AUDIO_LEVELS:-false}
 ENABLE_NOISY_MIC_DETECTION=${ENABLE_NOISY_MIC_DETECTION:-true}
 ENABLE_BREAKOUT_ROOMS=${ENABLE_BREAKOUT_ROOMS:-true}
+
+# Jibri (recording/streaming)
+ENABLE_JIBRI=$ENABLE_JIBRI
+JIBRI_RECORDER_USER=recorder
+JIBRI_RECORDER_PASSWORD=
+JIBRI_XMPP_USER=jibri
+JIBRI_XMPP_PASSWORD=
 
 # Recording/Streaming (requires Jibri)
 ENABLE_RECORDING=${ENABLE_RECORDING:-false}
@@ -363,10 +398,10 @@ RESOLUTION_WIDTH=${RESOLUTION_WIDTH:-1280}
 RESOLUTION_WIDTH_MIN=${RESOLUTION_WIDTH_MIN:-320}
 
 # Watermark
-SHOW_JITSI_WATERMARK=${SHOW_JITSI_WATERMARK:-false}
 JITSI_WATERMARK_LINK=${JITSI_WATERMARK_LINK:-}
-SHOW_BRAND_WATERMARK=${SHOW_BRAND_WATERMARK:-false}
+SHOW_JITSI_WATERMARK=${SHOW_JITSI_WATERMARK:-false}
 BRAND_WATERMARK_LINK=${BRAND_WATERMARK_LINK:-}
+SHOW_BRAND_WATERMARK=${SHOW_BRAND_WATERMARK:-false}
 EOF
 	else
 		info "Found existing .env (preserving)."
@@ -397,6 +432,20 @@ fill_missing_secrets() {
 		pw="$(randpass)"
 		sed -i "s/^JVB_AUTH_PASSWORD=.*/JVB_AUTH_PASSWORD=$pw/" "$ENV_FILE"
 		changed=1
+	fi
+
+	# Jibri credentials (if enabled)
+	if [ "${ENABLE_JIBRI:-0}" = "1" ]; then
+		if [ -z "${JIBRI_RECORDER_PASSWORD:-}" ]; then
+			pw="$(randpass)"
+			sed -i "s/^JIBRI_RECORDER_PASSWORD=.*/JIBRI_RECORDER_PASSWORD=$pw/" "$ENV_FILE"
+			changed=1
+		fi
+		if [ -z "${JIBRI_XMPP_PASSWORD:-}" ]; then
+			pw="$(randpass)"
+			sed -i "s/^JIBRI_XMPP_PASSWORD=.*/JIBRI_XMPP_PASSWORD=$pw/" "$ENV_FILE"
+			changed=1
+		fi
 	fi
 
 	# Ensure ADMIN credentials (we store separately; not in .env)
@@ -441,6 +490,14 @@ services:
       - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
       - JVB_AUTH_USER=${JVB_AUTH_USER}
       - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
+      # Jibri (recording)
+      - JIBRI_XMPP_USER=${JIBRI_XMPP_USER}
+      - JIBRI_XMPP_PASSWORD=${JIBRI_XMPP_PASSWORD}
+      - JIBRI_RECORDER_USER=${JIBRI_RECORDER_USER}
+      - JIBRI_RECORDER_PASSWORD=${JIBRI_RECORDER_PASSWORD}
+      - XMPP_RECORDER_DOMAIN=recorder.meet.jitsi
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
     networks:
       meet:
         aliases:
@@ -457,8 +514,12 @@ services:
     environment:
       - XMPP_DOMAIN=meet.jitsi
       - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
       - JICOFO_AUTH_USER=${JICOFO_AUTH_USER}
       - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
+      - JIBRI_BREWERY_MUC=jibribrewery
+      - JIBRI_PENDING_TIMEOUT=90
       - ENABLE_AUTH=${ENABLE_AUTH}
       - XMPP_SERVER=xmpp.meet.jitsi
     networks: [ meet ]
@@ -542,6 +603,48 @@ networks:
   meet:
     driver: bridge
 YAML
+
+	# Add Jibri if enabled
+	if [ "${ENABLE_JIBRI:-0}" = "1" ]; then
+		info "Adding Jibri (recording/streaming) to compose..."
+		cat >>"$COMPOSE_FILE" <<'JIBRI_YAML'
+
+  # Jibri (recording/streaming)
+  jibri:
+    container_name: jitsi-jibri
+    image: jitsi/jibri:${JITSI_IMAGE_TAG}
+    restart: unless-stopped
+    depends_on: [ prosody, jicofo ]
+    privileged: true
+    volumes:
+      - ${CONFIG}/jibri:/config:Z
+      - /dev/shm:/dev/shm
+      - ${CONFIG}/recordings:/recordings:Z
+    environment:
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - XMPP_RECORDER_DOMAIN=recorder.meet.jitsi
+      - XMPP_SERVER=xmpp.meet.jitsi
+      - JIBRI_XMPP_USER=${JIBRI_XMPP_USER}
+      - JIBRI_XMPP_PASSWORD=${JIBRI_XMPP_PASSWORD}
+      - JIBRI_RECORDER_USER=${JIBRI_RECORDER_USER}
+      - JIBRI_RECORDER_PASSWORD=${JIBRI_RECORDER_PASSWORD}
+      - JIBRI_RECORDING_DIR=/recordings
+      - JIBRI_FINALIZE_RECORDING_SCRIPT_PATH=/config/finalize.sh
+      - JIBRI_STRIP_DOMAIN_JID=muc
+      - DISPLAY=:0
+      - TZ=${TZ}
+    cap_add:
+      - SYS_ADMIN
+      - NET_BIND_SERVICE
+    devices:
+      - /dev/snd:/dev/snd
+    shm_size: '2gb'
+    networks: [ meet ]
+JIBRI_YAML
+	fi
 }
 
 docker_compose() {
@@ -616,6 +719,7 @@ Auth enabled:               ${ENABLE_AUTH} (0=anyone can create rooms)
 Admin user:                 ${ADMIN_USER}@${PUBLIC_DOMAIN}
 Admin password:             (stored in $CREDS_FILE)
 SMTP relay:                 ${SMTP_SERVER}:${SMTP_PORT} (from ${SMTP_FROM})
+Jibri (recording):          ${ENABLE_JIBRI:-0} (0=disabled, 1=enabled)
 Images tag:                 ${JITSI_TAG}
 Data dir:                   ${JITSI_DATA_DIR}
 Compose file:               ${COMPOSE_FILE}
@@ -639,6 +743,7 @@ main() {
 
 	require_root "$@"
 	ensure_docker
+	check_jibri_prereqs
 	init_dirs
 	gen_env_if_missing
 
