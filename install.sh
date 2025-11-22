@@ -551,7 +551,7 @@ services:
     container_name: jitsi-prosody
     image: casjaysdevdocker/prosody:latest
     restart: unless-stopped
-		pull_policy: always
+    pull_policy: always
     ports:
       - "5222:5222"
       - "5347:5347"
@@ -590,7 +590,7 @@ services:
     container_name: jitsi-jicofo
     image: jitsi/jicofo:${JITSI_IMAGE_TAG}
     restart: unless-stopped
-		pull_policy: always
+    pull_policy: always
     depends_on: [ prosody ]
     volumes:
       - ${JITSI_CONFIG_DIR}/jicofo:/config:Z
@@ -612,7 +612,7 @@ services:
     container_name: jitsi-jvb
     image: jitsi/jvb:${JITSI_IMAGE_TAG}
     restart: unless-stopped
-		pull_policy: always
+    pull_policy: always
     depends_on: [ prosody ]
     ports:
       - "10000:10000/udp"
@@ -632,7 +632,7 @@ services:
     container_name: jitsi-web
     image: casjaysdevdocker/jitsi-web:latest
     restart: unless-stopped
-		pull_policy: always
+    pull_policy: always
     depends_on: [ prosody, jicofo ]
     ports:
       - "${HTTP_PORT:-64453}:80"
@@ -699,7 +699,7 @@ YAML
     container_name: jitsi-jibri
     image: jitsi/jibri:${JITSI_IMAGE_TAG}
     restart: unless-stopped
-		pull_policy: always
+    pull_policy: always
     depends_on: [ prosody, jicofo ]
     privileged: true
     volumes:
