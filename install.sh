@@ -141,8 +141,17 @@ PUBLIC_DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -e 's|^https\?://||' -e 's|/.*||
 HOST_TZ="America/New_York"
 
 # Load existing .env if present (allows re-run to preserve settings)
-if [ -f "$ENV_FILE" ]; then
-	. "$ENV_FILE"
+# Skip if in remove mode to avoid parse errors
+if [ -f "$ENV_FILE" ] && [ "${REMOVE_MODE:-0}" != "1" ]; then
+	# Source with eval to handle quoted values properly
+	while IFS= read -r line || [ -n "$line" ]; do
+		# Skip comments and empty lines
+		case "$line" in
+			\#*|"") continue ;;
+		esac
+		# Export the variable
+		eval "export $line" 2>/dev/null || true
+	done < "$ENV_FILE"
 fi
 
 HTTP_PORT="${HTTP_PORT:-64453}" # internal HTTP for reverse proxy
