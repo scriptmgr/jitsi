@@ -84,11 +84,13 @@ TLS is not handled inside the container stack. Instead, run a reverse proxy (e.g
 http://127.0.0.1:64453
 ```
 
-Example Nginx snippet:
+**Important:** WebSocket support is required for Jitsi to function properly.
+
+### Nginx
 
 ```nginx
 server {
-    listen 443 ssl;
+    listen 443 ssl http2;
     server_name meet.example.com;
 
     ssl_certificate /etc/letsencrypt/live/meet.example.com/fullchain.pem;
@@ -96,11 +98,53 @@ server {
 
     location / {
         proxy_pass http://127.0.0.1:64453;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
+```
+
+### Caddy
+
+```caddyfile
+meet.example.com {
+    reverse_proxy 127.0.0.1:64453
+}
+```
+
+### Traefik (docker labels)
+
+```yaml
+labels:
+  - "traefik.enable=true"
+  - "traefik.http.routers.jitsi.rule=Host(`meet.example.com`)"
+  - "traefik.http.routers.jitsi.tls.certresolver=letsencrypt"
+  - "traefik.http.services.jitsi.loadbalancer.server.port=64453"
+```
+
+### Apache
+
+```apache
+<VirtualHost *:443>
+    ServerName meet.example.com
+
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/meet.example.com/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/meet.example.com/privkey.pem
+
+    ProxyPreserveHost On
+    ProxyPass / http://127.0.0.1:64453/
+    ProxyPassReverse / http://127.0.0.1:64453/
+
+    RewriteEngine On
+    RewriteCond %{HTTP:Upgrade} =websocket [NC]
+    RewriteRule /(.*) ws://127.0.0.1:64453/$1 [P,L]
+</VirtualHost>
 ```
 
 
