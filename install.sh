@@ -142,15 +142,15 @@ HOST_TZ="America/New_York"
 
 # Load existing .env if present (allows re-run to preserve settings)
 # Skip if in remove mode to avoid parse errors
+# Note: We parse it carefully since docker-compose .env format differs from shell
 if [ -f "$ENV_FILE" ] && [ "${REMOVE_MODE:-0}" != "1" ]; then
-	# Source with eval to handle quoted values properly
-	while IFS= read -r line || [ -n "$line" ]; do
+	while IFS='=' read -r key value; do
 		# Skip comments and empty lines
-		case "$line" in
+		case "$key" in
 			\#*|"") continue ;;
 		esac
-		# Export the variable
-		eval "export $line" 2>/dev/null || true
+		# Export the variable (value may contain spaces)
+		export "$key=$value" 2>/dev/null || true
 	done < "$ENV_FILE"
 fi
 
@@ -442,9 +442,9 @@ SMTP_STARTTLS=${SMTP_STARTTLS:-0}
 JITSI_IMAGE_TAG=$JITSI_TAG
 
 # Branding (customize these)
-APP_NAME=\"$APP_NAME\"
-PROVIDER_NAME=\"$PROVIDER_NAME\"
-NATIVE_APP_NAME=\"$NATIVE_APP_NAME\"
+APP_NAME=$APP_NAME
+PROVIDER_NAME=$PROVIDER_NAME
+NATIVE_APP_NAME=$NATIVE_APP_NAME
 DEFAULT_LANGUAGE=$DEFAULT_LANGUAGE
 
 # Features
