@@ -23,201 +23,9 @@
 #   ADMIN_PASS=...    (if unset, generated)
 #   HTTP_PORT=64453   (change if needed; reverse proxy should point here)
 # shellcheck disable=SC1090
-
-set -eu
-
 VERSION="1.0.0"
 
-# -------- Help/Version --------
-show_help() {
-	cat <<EOF
-Jitsi Meet Installer - Deploy Jitsi Meet via Docker
-
-Usage: $0 [OPTIONS]
-
-Options:
-  -h, --help      Show this help message
-  -v, --version   Show version
-  -r, --remove    Stop containers, remove images, and delete install directory
-
-Core Environment Variables:
-  JITSI_BASE_DIR      Installation directory (default: /opt/jitsi)
-  PUBLIC_URL          Public URL for Jitsi Meet
-  ENABLE_AUTH         0 = anyone can create rooms, 1 = auth required
-  ADMIN_USER          Admin username (default: administrator)
-  ADMIN_PASS          Admin password (generated if not set)
-  HTTP_PORT           HTTP port (default: 64453)
-  JITSI_TAG           Docker image tag (default: unstable)
-  TZ                  Timezone (default: America/New_York or host TZ)
-
-Branding:
-  APP_NAME            Application name (default: CasjaysDev Meet)
-  PROVIDER_NAME       Provider name (default: CasjaysDev)
-  DEFAULT_LANGUAGE    UI language (default: en)
-
-Features:
-  ENABLE_REGISTRATION User self-registration (default: true)
-  ENABLE_WELCOME_PAGE Show welcome/landing page (default: true)
-  ENABLE_PREJOIN_PAGE Preview before joining (default: true)
-  ENABLE_LOBBY        Waiting room feature (default: true)
-  ENABLE_BREAKOUT_ROOMS Sub-meeting rooms (default: true)
-
-Recording (requires Jibri):
-  ENABLE_JIBRI        Enable Jibri for recording/streaming (default: 0)
-                      When enabled, auto-enables recording features
-
-Video Quality:
-  RESOLUTION          Default video height (default: 720)
-  RESOLUTION_WIDTH    Default video width (default: 1280)
-
-Watermark:
-  SHOW_JITSI_WATERMARK  Show Jitsi logo (default: false)
-  SHOW_BRAND_WATERMARK  Show custom logo (default: false)
-  BRAND_WATERMARK_LINK  URL for custom logo click
-
-Examples:
-  sudo sh $0
-  PUBLIC_URL=https://meet.example.com sudo -E sh $0
-  ENABLE_JIBRI=1 PUBLIC_URL=https://meet.example.com sudo -E sh $0
-  APP_NAME="My Meetings" ENABLE_AUTH=1 sudo -E sh $0
-  sudo sh $0 --remove
-EOF
-	exit 0
-}
-
-show_version() {
-	echo "Jitsi Meet Installer v${VERSION}"
-	exit 0
-}
-
-do_remove() {
-	require_root "$@"
-
-	if [ ! -d "$JITSI_BASE_DIR" ]; then
-		die "Installation directory not found: $JITSI_BASE_DIR"
-	fi
-
-	info "Stopping and removing Jitsi containers..."
-	if [ -f "$COMPOSE_FILE" ]; then
-		docker_compose down --rmi all --volumes 2>/dev/null || true
-	fi
-
-	info "Removing installation directory: $JITSI_BASE_DIR"
-	rm -rf "$JITSI_BASE_DIR"
-
-	info "Jitsi Meet has been removed."
-	exit 0
-}
-
-# Parse arguments
-while [ $# -gt 0 ]; do
-	case "$1" in
-	-h | --help)
-		show_help
-		;;
-	-v | --version)
-		show_version
-		;;
-	-r | --remove)
-		REMOVE_MODE=1
-		shift
-		;;
-	*)
-		die "Unknown option: $1. Use --help for usage."
-		;;
-	esac
-done
-
-# -------- Config (defaults) --------
-JITSI_BASE_DIR="${JITSI_BASE_DIR:-/opt/jitsi}"
-ENV_FILE="$JITSI_BASE_DIR/.env"
-COMPOSE_FILE="$JITSI_BASE_DIR/docker-compose.yml"
-JITSI_DATA_DIR="$JITSI_BASE_DIR/rootfs/data"
-JITSI_CONFIG_DIR="$JITSI_BASE_DIR/rootfs/config"
-CREDS_FILE="$JITSI_BASE_DIR/credentials.txt"
-BACKUP_DIR="$JITSI_BASE_DIR/backup"
-PUBLIC_URL="${PUBLIC_URL:-http://$(hostname -f 2>/dev/null || hostname)}"
-# Extract domain from PUBLIC_URL (strip protocol) - used for auth, email, display
-PUBLIC_DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -e 's|^https\?://||' -e 's|/.*||' -e 's|:.*||')
-HOST_TZ="America/New_York"
-
-JVB_AUTH_PASSWORD="$(randpass)"
-JICOFO_AUTH_PASSWORD="$(randpass)"
-# Load existing .env if present (allows re-run to preserve settings)
-# Skip if in remove mode to avoid parse errors
-# Note: We parse it carefully since docker-compose .env format differs from shell
-if [ -f "$ENV_FILE" ] && [ "${REMOVE_MODE:-0}" != "1" ]; then
-	while IFS='=' read -r key value; do
-		# Skip comments and empty lines
-		case "$key" in
-		\#* | "") continue ;;
-		esac
-		# Export the variable (value may contain spaces)
-		export "$key=$value" 2>/dev/null || true
-	done <"$ENV_FILE"
-fi
-
-HTTP_PORT="${HTTP_PORT:-64453}" # internal HTTP for reverse proxy
-ENABLE_AUTH="${ENABLE_AUTH:-0}" # 0 = guest access (anyone can create rooms), 1 = auth required
-AUTH_TYPE="${AUTH_TYPE:-internal}"
-ADMIN_USER="${ADMIN_USER:-administrator}"
-# Strip domain from ADMIN_USER if provided (e.g., admin@domain.com -> admin)
-ADMIN_USER=$(printf '%s' "$ADMIN_USER" | sed 's/@.*//')
-# Detect host timezone
-if [ -f /etc/timezone ]; then
-	HOST_TZ=$(cat /etc/timezone)
-elif [ -L /etc/localtime ]; then
-	HOST_TZ=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')
-fi
-TZ="${TZ:-$HOST_TZ}"
-ADMIN_PASS="${ADMIN_PASS:-}"
-SMTP_SERVER_DEFAULT="host.docker.internal"
-SMTP_PORT_DEFAULT="25"
-# Docker image tags (can be overridden)
-JITSI_TAG="${JITSI_TAG:-unstable}"
-# Jibri (recording/streaming) - disabled by default
-ENABLE_JIBRI="${ENABLE_JIBRI:-0}"
-
-# Branding defaults
-APP_NAME="${APP_NAME:-CasjaysDev Meet}"
-PROVIDER_NAME="${PROVIDER_NAME:-CasjaysDev}"
-NATIVE_APP_NAME="${NATIVE_APP_NAME:-$APP_NAME}"
-DEFAULT_LANGUAGE="${DEFAULT_LANGUAGE:-en}"
-
-# Feature defaults
-ENABLE_WELCOME_PAGE="${ENABLE_WELCOME_PAGE:-true}"
-ENABLE_PREJOIN_PAGE="${ENABLE_PREJOIN_PAGE:-true}"
-ENABLE_LOBBY="${ENABLE_LOBBY:-true}"
-ENABLE_CLOSE_PAGE="${ENABLE_CLOSE_PAGE:-false}"
-DISABLE_AUDIO_LEVELS="${DISABLE_AUDIO_LEVELS:-false}"
-ENABLE_NOISY_MIC_DETECTION="${ENABLE_NOISY_MIC_DETECTION:-true}"
-ENABLE_BREAKOUT_ROOMS="${ENABLE_BREAKOUT_ROOMS:-true}"
-# User registration (via custom prosody image)
-ENABLE_REGISTRATION="${ENABLE_REGISTRATION:-true}"
-
-# Recording defaults (auto-enabled if Jibri is enabled)
-if [ "$ENABLE_JIBRI" = "1" ]; then
-	ENABLE_RECORDING="${ENABLE_RECORDING:-true}"
-	ENABLE_LIVESTREAMING="${ENABLE_LIVESTREAMING:-true}"
-	ENABLE_FILE_RECORDING_SERVICE="${ENABLE_FILE_RECORDING_SERVICE:-true}"
-else
-	ENABLE_RECORDING="${ENABLE_RECORDING:-false}"
-	ENABLE_LIVESTREAMING="${ENABLE_LIVESTREAMING:-false}"
-	ENABLE_FILE_RECORDING_SERVICE="${ENABLE_FILE_RECORDING_SERVICE:-false}"
-fi
-
-# Video quality defaults
-RESOLUTION="${RESOLUTION:-720}"
-RESOLUTION_MIN="${RESOLUTION_MIN:-180}"
-RESOLUTION_WIDTH="${RESOLUTION_WIDTH:-1280}"
-RESOLUTION_WIDTH_MIN="${RESOLUTION_WIDTH_MIN:-320}"
-
-# Watermark defaults
-SHOW_JITSI_WATERMARK="${SHOW_JITSI_WATERMARK:-false}"
-JITSI_WATERMARK_LINK="${JITSI_WATERMARK_LINK:-}"
-SHOW_BRAND_WATERMARK="${SHOW_BRAND_WATERMARK:-false}"
-BRAND_WATERMARK_LINK="${BRAND_WATERMARK_LINK:-}"
-# -----------------------------------
+set -eu
 
 umask 022
 
@@ -897,5 +705,196 @@ main() {
 	register_admin_user
 	post_summary
 }
+
+# -------- Help/Version --------
+show_help() {
+	cat <<EOF
+Jitsi Meet Installer - Deploy Jitsi Meet via Docker
+
+Usage: $0 [OPTIONS]
+
+Options:
+  -h, --help      Show this help message
+  -v, --version   Show version
+  -r, --remove    Stop containers, remove images, and delete install directory
+
+Core Environment Variables:
+  JITSI_BASE_DIR      Installation directory (default: /opt/jitsi)
+  PUBLIC_URL          Public URL for Jitsi Meet
+  ENABLE_AUTH         0 = anyone can create rooms, 1 = auth required
+  ADMIN_USER          Admin username (default: administrator)
+  ADMIN_PASS          Admin password (generated if not set)
+  HTTP_PORT           HTTP port (default: 64453)
+  JITSI_TAG           Docker image tag (default: unstable)
+  TZ                  Timezone (default: America/New_York or host TZ)
+
+Branding:
+  APP_NAME            Application name (default: CasjaysDev Meet)
+  PROVIDER_NAME       Provider name (default: CasjaysDev)
+  DEFAULT_LANGUAGE    UI language (default: en)
+
+Features:
+  ENABLE_REGISTRATION User self-registration (default: true)
+  ENABLE_WELCOME_PAGE Show welcome/landing page (default: true)
+  ENABLE_PREJOIN_PAGE Preview before joining (default: true)
+  ENABLE_LOBBY        Waiting room feature (default: true)
+  ENABLE_BREAKOUT_ROOMS Sub-meeting rooms (default: true)
+
+Recording (requires Jibri):
+  ENABLE_JIBRI        Enable Jibri for recording/streaming (default: 0)
+                      When enabled, auto-enables recording features
+
+Video Quality:
+  RESOLUTION          Default video height (default: 720)
+  RESOLUTION_WIDTH    Default video width (default: 1280)
+
+Watermark:
+  SHOW_JITSI_WATERMARK  Show Jitsi logo (default: false)
+  SHOW_BRAND_WATERMARK  Show custom logo (default: false)
+  BRAND_WATERMARK_LINK  URL for custom logo click
+
+Examples:
+  sudo sh $0
+  PUBLIC_URL=https://meet.example.com sudo -E sh $0
+  ENABLE_JIBRI=1 PUBLIC_URL=https://meet.example.com sudo -E sh $0
+  APP_NAME="My Meetings" ENABLE_AUTH=1 sudo -E sh $0
+  sudo sh $0 --remove
+EOF
+	exit 0
+}
+
+show_version() {
+	echo "Jitsi Meet Installer v${VERSION}"
+	exit 0
+}
+
+do_remove() {
+	require_root "$@"
+
+	if [ ! -d "$JITSI_BASE_DIR" ]; then
+		die "Installation directory not found: $JITSI_BASE_DIR"
+	fi
+
+	info "Stopping and removing Jitsi containers..."
+	if [ -f "$COMPOSE_FILE" ]; then
+		docker_compose down --rmi all --volumes 2>/dev/null || true
+	fi
+
+	info "Removing installation directory: $JITSI_BASE_DIR"
+	rm -rf "$JITSI_BASE_DIR"
+
+	info "Jitsi Meet has been removed."
+	exit 0
+}
+
+# Parse arguments
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-h | --help)
+		show_help
+		;;
+	-v | --version)
+		show_version
+		;;
+	-r | --remove)
+		REMOVE_MODE=1
+		shift
+		;;
+	*)
+		die "Unknown option: $1. Use --help for usage."
+		;;
+	esac
+done
+
+# -------- Config (defaults) --------
+JITSI_BASE_DIR="${JITSI_BASE_DIR:-/opt/jitsi}"
+ENV_FILE="$JITSI_BASE_DIR/.env"
+COMPOSE_FILE="$JITSI_BASE_DIR/docker-compose.yml"
+JITSI_DATA_DIR="$JITSI_BASE_DIR/rootfs/data"
+JITSI_CONFIG_DIR="$JITSI_BASE_DIR/rootfs/config"
+CREDS_FILE="$JITSI_BASE_DIR/credentials.txt"
+BACKUP_DIR="$JITSI_BASE_DIR/backup"
+PUBLIC_URL="${PUBLIC_URL:-http://$(hostname -f 2>/dev/null || hostname)}"
+# Extract domain from PUBLIC_URL (strip protocol) - used for auth, email, display
+PUBLIC_DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -e 's|^https\?://||' -e 's|/.*||' -e 's|:.*||')
+HOST_TZ="America/New_York"
+
+JVB_AUTH_PASSWORD="$(randpass)"
+JICOFO_AUTH_PASSWORD="$(randpass)"
+# Load existing .env if present (allows re-run to preserve settings)
+# Skip if in remove mode to avoid parse errors
+# Note: We parse it carefully since docker-compose .env format differs from shell
+if [ -f "$ENV_FILE" ] && [ "${REMOVE_MODE:-0}" != "1" ]; then
+	while IFS='=' read -r key value; do
+		# Skip comments and empty lines
+		case "$key" in
+		\#* | "") continue ;;
+		esac
+		# Export the variable (value may contain spaces)
+		export "$key=$value" 2>/dev/null || true
+	done <"$ENV_FILE"
+fi
+
+HTTP_PORT="${HTTP_PORT:-64453}" # internal HTTP for reverse proxy
+ENABLE_AUTH="${ENABLE_AUTH:-0}" # 0 = guest access (anyone can create rooms), 1 = auth required
+AUTH_TYPE="${AUTH_TYPE:-internal}"
+ADMIN_USER="${ADMIN_USER:-administrator}"
+# Strip domain from ADMIN_USER if provided (e.g., admin@domain.com -> admin)
+ADMIN_USER=$(printf '%s' "$ADMIN_USER" | sed 's/@.*//')
+# Detect host timezone
+if [ -f /etc/timezone ]; then
+	HOST_TZ=$(cat /etc/timezone)
+elif [ -L /etc/localtime ]; then
+	HOST_TZ=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')
+fi
+TZ="${TZ:-$HOST_TZ}"
+ADMIN_PASS="${ADMIN_PASS:-}"
+SMTP_SERVER_DEFAULT="host.docker.internal"
+SMTP_PORT_DEFAULT="25"
+# Docker image tags (can be overridden)
+JITSI_TAG="${JITSI_TAG:-unstable}"
+# Jibri (recording/streaming) - disabled by default
+ENABLE_JIBRI="${ENABLE_JIBRI:-0}"
+
+# Branding defaults
+APP_NAME="${APP_NAME:-CasjaysDev Meet}"
+PROVIDER_NAME="${PROVIDER_NAME:-CasjaysDev}"
+NATIVE_APP_NAME="${NATIVE_APP_NAME:-$APP_NAME}"
+DEFAULT_LANGUAGE="${DEFAULT_LANGUAGE:-en}"
+
+# Feature defaults
+ENABLE_WELCOME_PAGE="${ENABLE_WELCOME_PAGE:-true}"
+ENABLE_PREJOIN_PAGE="${ENABLE_PREJOIN_PAGE:-true}"
+ENABLE_LOBBY="${ENABLE_LOBBY:-true}"
+ENABLE_CLOSE_PAGE="${ENABLE_CLOSE_PAGE:-false}"
+DISABLE_AUDIO_LEVELS="${DISABLE_AUDIO_LEVELS:-false}"
+ENABLE_NOISY_MIC_DETECTION="${ENABLE_NOISY_MIC_DETECTION:-true}"
+ENABLE_BREAKOUT_ROOMS="${ENABLE_BREAKOUT_ROOMS:-true}"
+# User registration (via custom prosody image)
+ENABLE_REGISTRATION="${ENABLE_REGISTRATION:-true}"
+
+# Recording defaults (auto-enabled if Jibri is enabled)
+if [ "$ENABLE_JIBRI" = "1" ]; then
+	ENABLE_RECORDING="${ENABLE_RECORDING:-true}"
+	ENABLE_LIVESTREAMING="${ENABLE_LIVESTREAMING:-true}"
+	ENABLE_FILE_RECORDING_SERVICE="${ENABLE_FILE_RECORDING_SERVICE:-true}"
+else
+	ENABLE_RECORDING="${ENABLE_RECORDING:-false}"
+	ENABLE_LIVESTREAMING="${ENABLE_LIVESTREAMING:-false}"
+	ENABLE_FILE_RECORDING_SERVICE="${ENABLE_FILE_RECORDING_SERVICE:-false}"
+fi
+
+# Video quality defaults
+RESOLUTION="${RESOLUTION:-720}"
+RESOLUTION_MIN="${RESOLUTION_MIN:-180}"
+RESOLUTION_WIDTH="${RESOLUTION_WIDTH:-1280}"
+RESOLUTION_WIDTH_MIN="${RESOLUTION_WIDTH_MIN:-320}"
+
+# Watermark defaults
+SHOW_JITSI_WATERMARK="${SHOW_JITSI_WATERMARK:-false}"
+JITSI_WATERMARK_LINK="${JITSI_WATERMARK_LINK:-}"
+SHOW_BRAND_WATERMARK="${SHOW_BRAND_WATERMARK:-false}"
+BRAND_WATERMARK_LINK="${BRAND_WATERMARK_LINK:-}"
+# -----------------------------------
 
 main "$@"
