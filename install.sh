@@ -891,6 +891,7 @@ while [ $# -gt 0 ]; do
 	-v|--version) show_version ;;
 	-r|--remove) REMOVE_MODE=1; shift ;;
 	--user) shift; user_management "$@" ;;
+	--) shift; break ;;  # End of options marker
 	*) die "Unknown option: $1" ;;
 	esac
 done
