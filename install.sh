@@ -116,8 +116,16 @@ setup_docker_official() {
 
     dnf)
       dnf -y install dnf-plugins-core curl
-      dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo || \
-      dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+      . /etc/os-release
+      case "$ID" in
+        fedora)
+          dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+          ;;
+        *)
+          # RHEL, CentOS, AlmaLinux, Rocky, etc.
+          dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+          ;;
+      esac
       dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
       systemctl enable --now docker
       ;;
