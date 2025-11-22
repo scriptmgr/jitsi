@@ -26,6 +26,80 @@
 
 set -eu
 
+VERSION="1.0.0"
+
+# -------- Help/Version --------
+show_help() {
+  cat <<EOF
+Jitsi Meet Installer - Deploy Jitsi Meet via Docker
+
+Usage: $0 [OPTIONS]
+
+Options:
+  -h, --help      Show this help message
+  -v, --version   Show version
+  -r, --remove    Stop containers, remove images, and delete install directory
+
+Environment variables:
+  JITSI_BASE_DIR   Installation directory (default: /opt/jitsi)
+  PUBLIC_URL       Public URL for Jitsi Meet
+  ENABLE_AUTH      0 = anyone can create rooms, 1 = auth required
+  ADMIN_USER       Admin username (default: administrator)
+  ADMIN_PASS       Admin password (generated if not set)
+  HTTP_PORT        HTTP port (default: 64453)
+  JITSI_TAG        Docker image tag (default: unstable)
+
+Examples:
+  sudo sh $0
+  PUBLIC_URL=https://meet.example.com sudo -E sh $0
+  sudo sh $0 --remove
+EOF
+  exit 0
+}
+
+show_version() {
+  echo "Jitsi Meet Installer v${VERSION}"
+  exit 0
+}
+
+do_remove() {
+  require_root "$@"
+
+  if [ ! -d "$JITSI_BASE_DIR" ]; then
+    die "Installation directory not found: $JITSI_BASE_DIR"
+  fi
+
+  info "Stopping and removing Jitsi containers..."
+  if [ -f "$COMPOSE_FILE" ]; then
+    docker_compose down --rmi all --volumes 2>/dev/null || true
+  fi
+
+  info "Removing installation directory: $JITSI_BASE_DIR"
+  rm -rf "$JITSI_BASE_DIR"
+
+  info "Jitsi Meet has been removed."
+  exit 0
+}
+
+# Parse arguments
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      show_help
+      ;;
+    -v|--version)
+      show_version
+      ;;
+    -r|--remove)
+      REMOVE_MODE=1
+      shift
+      ;;
+    *)
+      die "Unknown option: $1. Use --help for usage."
+      ;;
+  esac
+done
+
 # -------- Config (defaults) --------
 JITSI_BASE_DIR="${JITSI_BASE_DIR:-/opt/jitsi}"
 JITSI_DATA_DIR="$JITSI_BASE_DIR/.data"
@@ -483,6 +557,11 @@ OUT
 }
 
 main() {
+	# Handle remove mode
+	if [ "${REMOVE_MODE:-0}" = "1" ]; then
+		do_remove "$@"
+	fi
+
 	require_root "$@"
 	ensure_docker
 	init_dirs
