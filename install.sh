@@ -367,7 +367,7 @@ services:
       - "5347:5347"
       - "5280:5280"
     volumes:
-      - ${JITSI_CONFIG_DIR}/prosody:/config:Z
+      - $JITSI_CONFIG_DIR/prosody:/config:Z
     environment:
       - XMPP_DOMAIN=meet.jitsi
       - XMPP_AUTH_DOMAIN=auth.meet.jitsi
@@ -403,7 +403,7 @@ services:
     pull_policy: always
     depends_on: [ prosody ]
     volumes:
-      - ${JITSI_CONFIG_DIR}/jicofo:/config:Z
+      - $JITSI_CONFIG_DIR/jicofo:/config:Z
     environment:
       - XMPP_DOMAIN=meet.jitsi
       - XMPP_AUTH_DOMAIN=auth.meet.jitsi
@@ -427,7 +427,7 @@ services:
     ports:
       - "10000:10000/udp"
     volumes:
-      - ${JITSI_CONFIG_DIR}/jvb:/config:Z
+      - $JITSI_CONFIG_DIR/jvb:/config:Z
     environment:
       - XMPP_AUTH_DOMAIN=auth.meet.jitsi
       - JVB_AUTH_USER=${JVB_AUTH_USER}
@@ -447,7 +447,7 @@ services:
     ports:
       - "${HTTP_PORT:-64453}:80"
     volumes:
-      - ${JITSI_DATA_DIR}/web:/config:Z
+      - $JITSI_DATA_DIR/web:/config:Z
     environment:
       - ENABLE_LETSENCRYPT=0
       - ENABLE_HTTP_REDIRECT=0
@@ -493,10 +493,6 @@ services:
       - SHOW_BRAND_WATERMARK=${SHOW_BRAND_WATERMARK}
       - BRAND_WATERMARK_LINK=${BRAND_WATERMARK_LINK}
     networks: [ meet ]
-
-networks:
-  meet:
-    driver: bridge
 YAML
 
 	# Add Jibri if enabled
@@ -514,8 +510,8 @@ YAML
     privileged: true
     volumes:
       - /dev/shm:/dev/shm
-      - ${JITSI_CONFIG_DIR}/jibri:/config:Z
-      - ${JITSI_DATA_DIR}/recordings:/recordings:Z
+      - $JITSI_CONFIG_DIR/jibri:/config:Z
+      - $JITSI_DATA_DIR/recordings:/recordings:Z
     environment:
       - XMPP_DOMAIN=meet.jitsi
       - XMPP_AUTH_DOMAIN=auth.meet.jitsi
@@ -541,6 +537,13 @@ YAML
     networks: [ meet ]
 JIBRI_YAML
 	fi
+
+	cat >>"$COMPOSE_FILE" <<'NET_YAML'
+networks:
+  meet:
+    driver: bridge
+
+NET_YAML
 }
 
 docker_compose() {
