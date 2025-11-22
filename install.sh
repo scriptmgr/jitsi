@@ -456,7 +456,7 @@ fill_missing_secrets() {
 		fi
 	fi
 
-	[ "$changed" -eq 1 ] && info "Generated missing credentials."
+	[ "$changed" -ne 1 ] || info "Generated missing credentials."
 }
 
 # Generate docker-compose.yml with all services
