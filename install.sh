@@ -790,10 +790,54 @@ main() {
 	init_dirs
 	gen_env_if_missing
 
-	# Ensure SMTP defaults and tag keys exist in case .env was user-supplied
+	# Ensure all required keys exist in case .env was user-supplied or outdated
+	ensure_env_key CONFIG "./config"
 	ensure_env_key SMTP_SERVER "$SMTP_SERVER_DEFAULT"
 	ensure_env_key SMTP_PORT "$SMTP_PORT_DEFAULT"
+	ensure_env_key SMTP_FROM "no-reply@$PUBLIC_DOMAIN"
+	ensure_env_key SMTP_USERNAME ""
+	ensure_env_key SMTP_PASSWORD ""
+	ensure_env_key SMTP_TLS "0"
+	ensure_env_key SMTP_STARTTLS "0"
 	ensure_env_key JITSI_IMAGE_TAG "$JITSI_TAG"
+	ensure_env_key AUTH_TYPE "$AUTH_TYPE"
+	ensure_env_key ENABLE_GUESTS "1"
+	ensure_env_key JICOFO_AUTH_USER "focus"
+	ensure_env_key JVB_AUTH_USER "jvb"
+	ensure_env_key JVB_UDP_PORT "10000"
+	ensure_env_key JVB_TCP_HARVESTER_DISABLED "true"
+	# Branding
+	ensure_env_key APP_NAME "$APP_NAME"
+	ensure_env_key NATIVE_APP_NAME "$NATIVE_APP_NAME"
+	ensure_env_key PROVIDER_NAME "$PROVIDER_NAME"
+	ensure_env_key DEFAULT_LANGUAGE "$DEFAULT_LANGUAGE"
+	# Features
+	ensure_env_key ENABLE_WELCOME_PAGE "$ENABLE_WELCOME_PAGE"
+	ensure_env_key ENABLE_PREJOIN_PAGE "$ENABLE_PREJOIN_PAGE"
+	ensure_env_key ENABLE_LOBBY "$ENABLE_LOBBY"
+	ensure_env_key ENABLE_CLOSE_PAGE "$ENABLE_CLOSE_PAGE"
+	ensure_env_key DISABLE_AUDIO_LEVELS "$DISABLE_AUDIO_LEVELS"
+	ensure_env_key ENABLE_NOISY_MIC_DETECTION "$ENABLE_NOISY_MIC_DETECTION"
+	ensure_env_key ENABLE_BREAKOUT_ROOMS "$ENABLE_BREAKOUT_ROOMS"
+	ensure_env_key ENABLE_REGISTRATION "$ENABLE_REGISTRATION"
+	# Jibri
+	ensure_env_key ENABLE_JIBRI "$ENABLE_JIBRI"
+	ensure_env_key JIBRI_RECORDER_USER "recorder"
+	ensure_env_key JIBRI_XMPP_USER "jibri"
+	# Recording
+	ensure_env_key ENABLE_RECORDING "$ENABLE_RECORDING"
+	ensure_env_key ENABLE_LIVESTREAMING "$ENABLE_LIVESTREAMING"
+	ensure_env_key ENABLE_FILE_RECORDING_SERVICE "$ENABLE_FILE_RECORDING_SERVICE"
+	# Quality
+	ensure_env_key RESOLUTION "$RESOLUTION"
+	ensure_env_key RESOLUTION_MIN "$RESOLUTION_MIN"
+	ensure_env_key RESOLUTION_WIDTH "$RESOLUTION_WIDTH"
+	ensure_env_key RESOLUTION_WIDTH_MIN "$RESOLUTION_WIDTH_MIN"
+	# Watermark
+	ensure_env_key SHOW_JITSI_WATERMARK "$SHOW_JITSI_WATERMARK"
+	ensure_env_key JITSI_WATERMARK_LINK "$JITSI_WATERMARK_LINK"
+	ensure_env_key SHOW_BRAND_WATERMARK "$SHOW_BRAND_WATERMARK"
+	ensure_env_key BRAND_WATERMARK_LINK "$BRAND_WATERMARK_LINK"
 
 	fill_missing_secrets
 	write_compose
