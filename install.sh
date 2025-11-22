@@ -40,18 +40,46 @@ Options:
   -v, --version   Show version
   -r, --remove    Stop containers, remove images, and delete install directory
 
-Environment variables:
-  JITSI_BASE_DIR   Installation directory (default: /opt/jitsi)
-  PUBLIC_URL       Public URL for Jitsi Meet
-  ENABLE_AUTH      0 = anyone can create rooms, 1 = auth required
-  ADMIN_USER       Admin username (default: administrator)
-  ADMIN_PASS       Admin password (generated if not set)
-  HTTP_PORT        HTTP port (default: 64453)
-  JITSI_TAG        Docker image tag (default: unstable)
+Core Environment Variables:
+  JITSI_BASE_DIR      Installation directory (default: /opt/jitsi)
+  PUBLIC_URL          Public URL for Jitsi Meet
+  ENABLE_AUTH         0 = anyone can create rooms, 1 = auth required
+  ADMIN_USER          Admin username (default: administrator)
+  ADMIN_PASS          Admin password (generated if not set)
+  HTTP_PORT           HTTP port (default: 64453)
+  JITSI_TAG           Docker image tag (default: unstable)
+  TZ                  Timezone (default: America/New_York or host TZ)
+
+Branding:
+  APP_NAME            Application name (default: CasjaysDev Meet)
+  PROVIDER_NAME       Provider name (default: CasjaysDev)
+  DEFAULT_LANGUAGE    UI language (default: en)
+
+Features:
+  ENABLE_REGISTRATION User self-registration (default: true)
+  ENABLE_WELCOME_PAGE Show welcome/landing page (default: true)
+  ENABLE_PREJOIN_PAGE Preview before joining (default: true)
+  ENABLE_LOBBY        Waiting room feature (default: true)
+  ENABLE_BREAKOUT_ROOMS Sub-meeting rooms (default: true)
+
+Recording (requires Jibri):
+  ENABLE_JIBRI        Enable Jibri for recording/streaming (default: 0)
+                      When enabled, auto-enables recording features
+
+Video Quality:
+  RESOLUTION          Default video height (default: 720)
+  RESOLUTION_WIDTH    Default video width (default: 1280)
+
+Watermark:
+  SHOW_JITSI_WATERMARK  Show Jitsi logo (default: false)
+  SHOW_BRAND_WATERMARK  Show custom logo (default: false)
+  BRAND_WATERMARK_LINK  URL for custom logo click
 
 Examples:
   sudo sh $0
   PUBLIC_URL=https://meet.example.com sudo -E sh $0
+  ENABLE_JIBRI=1 PUBLIC_URL=https://meet.example.com sudo -E sh $0
+  APP_NAME="My Meetings" ENABLE_AUTH=1 sudo -E sh $0
   sudo sh $0 --remove
 EOF
 	exit 0
