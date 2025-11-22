@@ -386,10 +386,10 @@ JIBRI_RECORDER_PASSWORD=
 JIBRI_XMPP_USER=jibri
 JIBRI_XMPP_PASSWORD=
 
-# Recording/Streaming (requires Jibri)
-ENABLE_RECORDING=${ENABLE_RECORDING:-false}
-ENABLE_LIVESTREAMING=${ENABLE_LIVESTREAMING:-false}
-ENABLE_FILE_RECORDING_SERVICE=${ENABLE_FILE_RECORDING_SERVICE:-false}
+# Recording/Streaming (auto-enabled if Jibri is enabled)
+ENABLE_RECORDING=${ENABLE_RECORDING:-$( [ "$ENABLE_JIBRI" = "1" ] && echo true || echo false )}
+ENABLE_LIVESTREAMING=${ENABLE_LIVESTREAMING:-$( [ "$ENABLE_JIBRI" = "1" ] && echo true || echo false )}
+ENABLE_FILE_RECORDING_SERVICE=${ENABLE_FILE_RECORDING_SERVICE:-$( [ "$ENABLE_JIBRI" = "1" ] && echo true || echo false )}
 
 # Video Quality
 RESOLUTION=${RESOLUTION:-720}
