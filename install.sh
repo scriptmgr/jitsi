@@ -30,7 +30,7 @@ VERSION="1.0.0"
 
 # -------- Help/Version --------
 show_help() {
-  cat <<EOF
+	cat <<EOF
 Jitsi Meet Installer - Deploy Jitsi Meet via Docker
 
 Usage: $0 [OPTIONS]
@@ -54,59 +54,62 @@ Examples:
   PUBLIC_URL=https://meet.example.com sudo -E sh $0
   sudo sh $0 --remove
 EOF
-  exit 0
+	exit 0
 }
 
 show_version() {
-  echo "Jitsi Meet Installer v${VERSION}"
-  exit 0
+	echo "Jitsi Meet Installer v${VERSION}"
+	exit 0
 }
 
 do_remove() {
-  require_root "$@"
+	require_root "$@"
 
-  if [ ! -d "$JITSI_BASE_DIR" ]; then
-    die "Installation directory not found: $JITSI_BASE_DIR"
-  fi
+	if [ ! -d "$JITSI_BASE_DIR" ]; then
+		die "Installation directory not found: $JITSI_BASE_DIR"
+	fi
 
-  info "Stopping and removing Jitsi containers..."
-  if [ -f "$COMPOSE_FILE" ]; then
-    docker_compose down --rmi all --volumes 2>/dev/null || true
-  fi
+	info "Stopping and removing Jitsi containers..."
+	if [ -f "$COMPOSE_FILE" ]; then
+		docker_compose down --rmi all --volumes 2>/dev/null || true
+	fi
 
-  info "Removing installation directory: $JITSI_BASE_DIR"
-  rm -rf "$JITSI_BASE_DIR"
+	info "Removing installation directory: $JITSI_BASE_DIR"
+	rm -rf "$JITSI_BASE_DIR"
 
-  info "Jitsi Meet has been removed."
-  exit 0
+	info "Jitsi Meet has been removed."
+	exit 0
 }
 
 # Parse arguments
 while [ $# -gt 0 ]; do
-  case "$1" in
-    -h|--help)
-      show_help
-      ;;
-    -v|--version)
-      show_version
-      ;;
-    -r|--remove)
-      REMOVE_MODE=1
-      shift
-      ;;
-    *)
-      die "Unknown option: $1. Use --help for usage."
-      ;;
-  esac
+	case "$1" in
+	-h | --help)
+		show_help
+		;;
+	-v | --version)
+		show_version
+		;;
+	-r | --remove)
+		REMOVE_MODE=1
+		shift
+		;;
+	*)
+		die "Unknown option: $1. Use --help for usage."
+		;;
+	esac
 done
 
 # -------- Config (defaults) --------
 JITSI_BASE_DIR="${JITSI_BASE_DIR:-/opt/jitsi}"
-JITSI_DATA_DIR="$JITSI_BASE_DIR/.data"
-COMPOSE_FILE="$JITSI_BASE_DIR/docker-compose.yml"
 ENV_FILE="$JITSI_BASE_DIR/.env"
+COMPOSE_FILE="$JITSI_BASE_DIR/docker-compose.yml"
+JITSI_DATA_DIR="$JITSI_BASE_DIR/.data"
 CREDS_FILE="$JITSI_BASE_DIR/credentials.txt"
 BACKUP_DIR="$JITSI_BASE_DIR/.backup"
+PUBLIC_URL="${PUBLIC_URL:-http://$(hostname -f 2>/dev/null || hostname)}"
+# Extract domain from PUBLIC_URL (strip protocol)
+XMPP_DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -e 's|^https\?://||' -e 's|/.*||' -e 's|:.*||')
 
 # Load existing .env if present (allows re-run to preserve settings)
 if [ -f "$ENV_FILE" ]; then
@@ -114,14 +117,23 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 HTTP_PORT="${HTTP_PORT:-64453}" # internal HTTP for reverse proxy
-PUBLIC_URL="${PUBLIC_URL:-http://$(hostname -f 2>/dev/null || hostname)}"
 ENABLE_AUTH="${ENABLE_AUTH:-0}" # 0 = guest access (anyone can create rooms), 1 = auth required
 AUTH_TYPE="${AUTH_TYPE:-internal}"
 ADMIN_USER="${ADMIN_USER:-administrator}"
+# Strip domain from ADMIN_USER if provided (e.g., admin@domain.com -> admin)
+ADMIN_USER=$(printf '%s' "$ADMIN_USER" | sed 's/@.*//')
+# Detect host timezone, fallback to America/New_York
+if [ -f /etc/timezone ]; then
+	HOST_TZ=$(cat /etc/timezone)
+elif [ -L /etc/localtime ]; then
+	HOST_TZ=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')
+else
+	HOST_TZ="America/New_York"
+fi
+TZ="${TZ:-$HOST_TZ}"
 ADMIN_PASS="${ADMIN_PASS:-}"
 SMTP_SERVER_DEFAULT="host.docker.internal"
 SMTP_PORT_DEFAULT="25"
-
 # Docker image tags (can be overridden)
 JITSI_TAG="${JITSI_TAG:-unstable}"
 # -----------------------------------
@@ -294,15 +306,15 @@ HTTPS_PORT=0
 ENABLE_HTTP_REDIRECT=0
 ENABLE_LETSENCRYPT=0
 PUBLIC_URL=$PUBLIC_URL
-TZ=$(printf %s "${TZ:-UTC}")
+TZ=$TZ
 
 # Auth (optional)
 ENABLE_AUTH=$ENABLE_AUTH
+ENABLE_GUESTS=1
 AUTH_TYPE=$AUTH_TYPE
-XMPP_DOMAIN=meet.jitsi
-XMPP_AUTH_DOMAIN=auth.meet.jitsi
-XMPP_GUEST_DOMAIN=guest.meet.jitsi
-ENABLE_GUESTS=$([ "$ENABLE_AUTH" = "1" ] && echo 0 || echo 1)
+XMPP_DOMAIN=$XMPP_DOMAIN
+XMPP_AUTH_DOMAIN=auth.$XMPP_DOMAIN
+XMPP_GUEST_DOMAIN=guest.$XMPP_DOMAIN
 
 # Component creds (autofilled if empty on first run)
 JICOFO_AUTH_USER=focus
@@ -402,7 +414,7 @@ services:
     networks:
       meet:
         aliases:
-          - xmpp.meet.jitsi
+          - xmpp.${XMPP_DOMAIN}
 
   # Focus (Jicofo)
   jicofo:
@@ -418,7 +430,7 @@ services:
       - JICOFO_AUTH_USER=${JICOFO_AUTH_USER}
       - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
       - ENABLE_AUTH=${ENABLE_AUTH}
-      - XMPP_SERVER=xmpp.meet.jitsi
+      - XMPP_SERVER=xmpp.${XMPP_DOMAIN}
     networks: [ meet ]
 
   # Videobridge
@@ -437,7 +449,7 @@ services:
       - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
       - JVB_UDP_PORT=${JVB_UDP_PORT}
       - JVB_TCP_HARVESTER_DISABLED=${JVB_TCP_HARVESTER_DISABLED}
-      - XMPP_SERVER=xmpp.meet.jitsi
+      - XMPP_SERVER=xmpp.${XMPP_DOMAIN}
     networks: [ meet ]
 
   # Web (no TLS here; reverse proxy handles it)
@@ -466,7 +478,7 @@ services:
       - SMTP_PASSWORD=${SMTP_PASSWORD}
       - SMTP_TLS=${SMTP_TLS}
       - SMTP_STARTTLS=${SMTP_STARTTLS}
-      - XMPP_SERVER=xmpp.meet.jitsi
+      - XMPP_SERVER=xmpp.${XMPP_DOMAIN}
     networks: [ meet ]
 
 networks:
