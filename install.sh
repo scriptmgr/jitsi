@@ -110,6 +110,7 @@ BACKUP_DIR="$JITSI_BASE_DIR/.backup"
 PUBLIC_URL="${PUBLIC_URL:-http://$(hostname -f 2>/dev/null || hostname)}"
 # Extract domain from PUBLIC_URL (strip protocol)
 XMPP_DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -e 's|^https\?://||' -e 's|/.*||' -e 's|:.*||')
+HOST_TZ="America/New_York"
 
 # Load existing .env if present (allows re-run to preserve settings)
 if [ -f "$ENV_FILE" ]; then
@@ -122,13 +123,11 @@ AUTH_TYPE="${AUTH_TYPE:-internal}"
 ADMIN_USER="${ADMIN_USER:-administrator}"
 # Strip domain from ADMIN_USER if provided (e.g., admin@domain.com -> admin)
 ADMIN_USER=$(printf '%s' "$ADMIN_USER" | sed 's/@.*//')
-# Detect host timezone, fallback to America/New_York
+# Detect host timezone
 if [ -f /etc/timezone ]; then
 	HOST_TZ=$(cat /etc/timezone)
 elif [ -L /etc/localtime ]; then
 	HOST_TZ=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')
-else
-	HOST_TZ="America/New_York"
 fi
 TZ="${TZ:-$HOST_TZ}"
 ADMIN_PASS="${ADMIN_PASS:-}"
