@@ -9,7 +9,10 @@ This repository provides a **POSIX-compliant** installation and update script (`
 - ✅ Idempotent: re-run safely to update without breaking existing setup
 - ✅ Reverse proxy–friendly (HTTP bound to port **64453**)
 - ✅ Auth **optional by default** (anyone can create rooms)
+- ✅ **User self-registration** via web form or XMPP client
 - ✅ Creates or updates **admin account** automatically
+- ✅ **Customizable branding** (app name, watermark, etc.)
+- ✅ **Optional Jibri** for recording and live streaming
 - ✅ Email delivery via host mail server
 
 
@@ -25,8 +28,9 @@ curl -fsSL https://github.com/scriptmgr/jitsi/raw/refs/heads/main/install.sh | s
 Or with environment overrides:
 
 ```sh
-export PUBLIC_URL=https://example.com
+export PUBLIC_URL=https://meet.example.com
 export ENABLE_AUTH=1
+export APP_NAME="My Company Meetings"
 curl -fsSL https://github.com/scriptmgr/jitsi/raw/refs/heads/main/install.sh | sudo -E sh
 ```
 
@@ -53,29 +57,101 @@ That's it. The script will:
 
 - **Public URL:** `http://$(hostname -f)` unless overridden
 - **Email:** Containers send via `host.docker.internal:25` (relay to host MTA)
+- **User registration:** Enabled by default at `/register`
 
 
-## Environment Overrides
+## Environment Variables
 
-You can set environment variables before running `install.sh`:
+### Core Settings
 
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JITSI_BASE_DIR` | `/opt/jitsi` | Installation root directory |
+| `PUBLIC_URL` | `http://$(hostname)` | Public URL for Jitsi Meet |
+| `HTTP_PORT` | `64453` | Internal HTTP port |
+| `ENABLE_AUTH` | `0` | `0` = open, `1` = secure domain |
+| `ADMIN_USER` | `administrator` | Admin username |
+| `ADMIN_PASS` | (generated) | Admin password |
+| `JITSI_TAG` | `unstable` | Docker image tag |
+| `TZ` | `America/New_York` | Timezone |
+
+### Branding
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `APP_NAME` | `CasjaysDev Meet` | Application name shown in UI |
+| `PROVIDER_NAME` | `CasjaysDev` | Provider/company name |
+| `DEFAULT_LANGUAGE` | `en` | UI language |
+
+### Features
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENABLE_REGISTRATION` | `true` | User self-registration |
+| `ENABLE_WELCOME_PAGE` | `true` | Show landing page |
+| `ENABLE_PREJOIN_PAGE` | `true` | Preview audio/video before joining |
+| `ENABLE_LOBBY` | `true` | Waiting room feature |
+| `ENABLE_BREAKOUT_ROOMS` | `true` | Sub-meeting rooms |
+
+### Recording (Jibri)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENABLE_JIBRI` | `0` | Enable Jibri container |
+| `ENABLE_RECORDING` | `false`* | Show recording button |
+| `ENABLE_LIVESTREAMING` | `false`* | Show streaming button |
+
+*Auto-enabled when `ENABLE_JIBRI=1`
+
+### Video Quality
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RESOLUTION` | `720` | Default video height |
+| `RESOLUTION_WIDTH` | `1280` | Default video width |
+
+### Watermark
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SHOW_JITSI_WATERMARK` | `false` | Show Jitsi logo |
+| `SHOW_BRAND_WATERMARK` | `false` | Show custom logo |
+| `BRAND_WATERMARK_LINK` | (empty) | URL for custom logo click |
+
+
+## User Registration
+
+Users can register accounts in two ways:
+
+### Web Registration
+Visit `/register` on your Jitsi instance to create an account through a web form.
+
+### XMPP Client Registration
+Connect to port `5222` with any XMPP client that supports in-band registration:
+- Conversations (Android)
+- Gajim (Desktop)
+- Dino (Desktop)
+- Monal (iOS)
+
+To disable registration:
 ```sh
-JITSI_BASE_DIR=/srv/jitsi \
-PUBLIC_URL=https://example.com \
-ENABLE_AUTH=1 \
-ADMIN_USER=myadmin \
-ADMIN_PASS=secretpass \
-HTTP_PORT=8080 \
-sudo -E sh ./install.sh
+ENABLE_REGISTRATION=false sudo -E sh install.sh
 ```
 
-Key variables:
 
-- `JITSI_BASE_DIR` – installation root (default: `/opt/jitsi`)
-- `PUBLIC_URL` – base URL for Jitsi Meet
-- `HTTP_PORT` – internal HTTP port (default: `64453`)
-- `ENABLE_AUTH` – `0` (default, anyone can create rooms) or `1` (secure domain)
-- `ADMIN_USER` / `ADMIN_PASS` – credentials for Prosody admin
+## Recording with Jibri
+
+To enable recording and live streaming:
+
+```sh
+ENABLE_JIBRI=1 PUBLIC_URL=https://meet.example.com sudo -E sh install.sh
+```
+
+**Requirements:**
+- Sufficient CPU/RAM (Jibri runs headless Chrome)
+- ALSA loopback kernel module (`snd-aloop`) - script will attempt to load it
+
+Recordings are saved to `/opt/jitsi/config/recordings/`.
 
 
 ## Reverse Proxy
@@ -93,10 +169,10 @@ http://127.0.0.1:64453
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name example.com *.example.com;
+    server_name meet.example.com;
 
-    ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/meet.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/meet.example.com/privkey.pem;
 
     location / {
         proxy_pass http://127.0.0.1:64453;
@@ -114,41 +190,10 @@ server {
 ### Caddy
 
 ```caddyfile
-example.com {
+meet.example.com {
     reverse_proxy 127.0.0.1:64453
 }
 ```
-
-### Traefik (docker labels)
-
-```yaml
-labels:
-  - "traefik.enable=true"
-  - "traefik.http.routers.jitsi.rule=Host(`example.com`)"
-  - "traefik.http.routers.jitsi.tls.certresolver=letsencrypt"
-  - "traefik.http.services.jitsi.loadbalancer.server.port=64453"
-```
-
-### Apache
-
-```apache
-<VirtualHost *:443>
-    ServerName example.com
-
-    SSLEngine on
-    SSLCertificateFile /etc/letsencrypt/live/example.com/fullchain.pem
-    SSLCertificateKeyFile /etc/letsencrypt/live/example.com/privkey.pem
-
-    ProxyPreserveHost On
-    ProxyPass / http://127.0.0.1:64453/
-    ProxyPassReverse / http://127.0.0.1:64453/
-
-    RewriteEngine On
-    RewriteCond %{HTTP:Upgrade} =websocket [NC]
-    RewriteRule /(.*) ws://127.0.0.1:64453/$1 [P,L]
-</VirtualHost>
-```
-
 
 
 ## Updating
@@ -162,10 +207,24 @@ curl -fsSL https://github.com/scriptmgr/jitsi/raw/refs/heads/main/install.sh | s
 This will:
 
 - Read existing `.env` to preserve your settings
+- Add any new configuration options
 - Pull updated Docker images
 - Recreate the stack with no data loss
 - Preserve and/or regenerate secrets as needed
 - Update the admin account password if changed
+
+
+## Uninstalling
+
+```sh
+curl -fsSL https://github.com/scriptmgr/jitsi/raw/refs/heads/main/install.sh | sudo sh -s -- --remove
+```
+
+Or if you have the script locally:
+
+```sh
+sudo sh install.sh --remove
+```
 
 
 ## Files & Layout
@@ -173,8 +232,19 @@ This will:
 - `/opt/jitsi/.env` – main configuration
 - `/opt/jitsi/docker-compose.yml` – container stack definition
 - `/opt/jitsi/config/` – persistent config mounted into containers
+- `/opt/jitsi/config/recordings/` – Jibri recordings (if enabled)
 - `/opt/jitsi/credentials.txt` – saved admin credentials
 - `/opt/jitsi/.backup/` – timestamped backups of replaced files
+
+
+## Custom Docker Images
+
+This installer uses custom Docker images with enhanced features:
+
+- **`casjaysdevdocker/prosody`** - Prosody with user registration enabled
+- **`casjaysdevdocker/jitsi-web`** - Web UI with registration page
+
+These are based on the official `jitsi/*` images with additional modules.
 
 
 ## Requirements
@@ -191,6 +261,6 @@ MIT. See [LICENSE](LICENSE).
 
 ## Notes
 
-- Designed for **reverse proxy** use only. Jitsi’s internal web container runs plain HTTP.
+- Designed for **reverse proxy** use only. Jitsi's internal web container runs plain HTTP.
 - `ENABLE_AUTH=0` allows open room creation (default). Switch to `ENABLE_AUTH=1` in `.env` for secure domain.
-- Uses the **official Docker Hub images** (`jitsi/web`, `jitsi/prosody`, `jitsi/jicofo`, `jitsi/jvb`).
+- Uses custom Docker images based on official Jitsi images with registration support.
