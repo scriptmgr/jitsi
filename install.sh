@@ -748,11 +748,16 @@ wait_for_prosody() {
 	info "Waiting for Prosody to become ready..."
 	i=0
 	while :; do
-		if docker logs jitsi-prosody 2>&1 | grep -q "Prosody is ready"; then
+		# Check for various ready indicators in Prosody logs
+		if docker logs jitsi-prosody 2>&1 | grep -qE "(Prosody is ready|Started|prosody started|Activated service)"; then
+			break
+		fi
+		# Also check if prosody is responding
+		if docker exec jitsi-prosody prosodyctl status >/dev/null 2>&1; then
 			break
 		fi
 		i=$((i + 1))
-		if [ "$i" -gt 60 ]; then
+		if [ "$i" -gt 30 ]; then
 			warn "Prosody readiness not confirmed in time; continuing."
 			break
 		fi
