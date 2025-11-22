@@ -147,11 +147,11 @@ if [ -f "$ENV_FILE" ] && [ "${REMOVE_MODE:-0}" != "1" ]; then
 	while IFS='=' read -r key value; do
 		# Skip comments and empty lines
 		case "$key" in
-			\#*|"") continue ;;
+		\#* | "") continue ;;
 		esac
 		# Export the variable (value may contain spaces)
 		export "$key=$value" 2>/dev/null || true
-	done < "$ENV_FILE"
+	done <"$ENV_FILE"
 fi
 
 HTTP_PORT="${HTTP_PORT:-64453}" # internal HTTP for reverse proxy
@@ -261,7 +261,7 @@ check_jibri_prereqs() {
 
 			# Try to make it persistent
 			if [ -d /etc/modules-load.d ]; then
-				echo "snd-aloop" > /etc/modules-load.d/jibri.conf
+				echo "snd-aloop" >/etc/modules-load.d/jibri.conf
 				info "Added snd-aloop to /etc/modules-load.d/jibri.conf"
 			fi
 		else
@@ -421,9 +421,9 @@ PUBLIC_DOMAIN=$PUBLIC_DOMAIN
 
 # Component creds (autofilled if empty on first run)
 JICOFO_AUTH_USER=focus
-JICOFO_AUTH_PASSWORD=
+JICOFO_AUTH_PASSWORD=$JICOFO_AUTH_PASSWORD
 JVB_AUTH_USER=jvb
-JVB_AUTH_PASSWORD=
+JVB_AUTH_PASSWORD=$JVB_AUTH_PASSWORD
 
 # Videobridge / RTP
 JVB_UDP_PORT=10000
@@ -442,9 +442,9 @@ SMTP_STARTTLS=${SMTP_STARTTLS:-0}
 JITSI_IMAGE_TAG=$JITSI_TAG
 
 # Branding (customize these)
-APP_NAME=$APP_NAME
-PROVIDER_NAME=$PROVIDER_NAME
-NATIVE_APP_NAME=$NATIVE_APP_NAME
+APP_NAME='$APP_NAME'
+PROVIDER_NAME='$PROVIDER_NAME'
+NATIVE_APP_NAME='$NATIVE_APP_NAME'
 DEFAULT_LANGUAGE=$DEFAULT_LANGUAGE
 
 # Features
