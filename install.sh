@@ -1,19 +1,18 @@
 #!/bin/sh
 # POSIX-compliant installer/updater for a full Jitsi Meet (docker-jitsi-meet) stack
 # - Uses official Docker Engine repos (NOT distro 'docker.io' package)
-# - No curl|sh piping
-# - No docker.io (apt pkg) — installs Docker CE from official repos
+# - Self-contained: generates all config files (no git clone needed)
 # - HTTP port set to 64453 (reverse proxy terminates TLS)
 # - Auth optional (default: anyone can create rooms)
 # - Creates/updates admin user 'administrator' with random password if missing
 # - Email server assumed to be on the host; containers use host.docker.internal as SMTP
-# - Safe to re-run to update images and config
+# - Safe to re-run to update images and config (reads existing .env)
 #
-# Requirements: POSIX sh, root privileges (or sudo), git, gpg (for repo keys)
+# Requirements: POSIX sh, root privileges (or sudo), curl, gpg (for repo keys)
 # Tested families: Debian/Ubuntu, RHEL/CentOS/Alma/Rocky, Fedora, openSUSE, Arch
 #
 # Usage:
-#   sudo sh ./install.sh
+#   curl -fsSL https://github.com/scriptmgr/jitsi/raw/refs/heads/main/install.sh | sudo -E sh
 #
 # Environment overrides (optional):
 #   JITSI_BASE_DIR=/opt/jitsi
@@ -32,8 +31,12 @@ COMPOSE_FILE="$JITSI_BASE_DIR/docker-compose.yml"
 ENV_FILE="$JITSI_BASE_DIR/.env"
 CREDS_FILE="$JITSI_BASE_DIR/credentials.txt"
 BACKUP_DIR="$JITSI_BASE_DIR/.backup"
-REPO_URL="${REPO_URL:-https://github.com/scriptmgr/jitsi}"
-GIT_BRANCH="${GIT_BRANCH:-main}"
+
+# Load existing .env if present (allows re-run to preserve settings)
+if [ -f "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+fi
 
 HTTP_PORT="${HTTP_PORT:-64453}"           # internal HTTP for reverse proxy
 PUBLIC_URL="${PUBLIC_URL:-http://$(hostname -f 2>/dev/null || hostname)}"
@@ -96,7 +99,7 @@ setup_docker_official() {
       # Avoid distro 'docker.io' pkg; use official Docker APT repo
       need_cmd gpg || apt-get update && apt-get install -y gpg
       apt-get update
-      apt-get install -y ca-certificates gnupg git
+      apt-get install -y ca-certificates gnupg curl
       install -m 0755 -d /etc/apt/keyrings
       if [ ! -s /etc/apt/keyrings/docker.gpg ]; then
         curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID")/gpg \
@@ -112,7 +115,7 @@ setup_docker_official() {
       ;;
 
     dnf)
-      dnf -y install dnf-plugins-core git
+      dnf -y install dnf-plugins-core curl
       dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo || \
       dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
       dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
@@ -120,7 +123,7 @@ setup_docker_official() {
       ;;
 
     yum)
-      yum -y install yum-utils git
+      yum -y install yum-utils curl
       yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
       yum -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
       systemctl enable --now docker
@@ -128,7 +131,7 @@ setup_docker_official() {
 
     zypper)
       zypper refresh
-      zypper -n install ca-certificates curl git
+      zypper -n install ca-certificates curl
       . /etc/os-release
       zypper -n addrepo https://download.docker.com/linux/$ID/docker-ce.repo docker-ce || true
       zypper refresh
@@ -138,7 +141,7 @@ setup_docker_official() {
       ;;
 
     pacman)
-      pacman -Sy --noconfirm --needed docker docker-compose git
+      pacman -Sy --noconfirm --needed docker docker-compose
       systemctl enable --now docker
       ;;
 
@@ -179,15 +182,6 @@ init_dirs() {
   mkdir -p "$JITSI_BASE_DIR/config"  # to mount into containers
 }
 
-git_prepare_repo() {
-  if [ -d "$JITSI_BASE_DIR/.git" ]; then
-    info "Repo exists, updating: $JITSI_BASE_DIR"
-    (cd "$JITSI_BASE_DIR" && git fetch --all --tags && git reset --hard "origin/$GIT_BRANCH")
-  else
-    info "Cloning $REPO_URL into $JITSI_BASE_DIR"
-    git clone --branch "$GIT_BRANCH" "$REPO_URL" "$JITSI_BASE_DIR"
-  fi
-}
 
 gen_env_if_missing() {
   if [ ! -f "$ENV_FILE" ]; then
@@ -467,7 +461,6 @@ main() {
   require_root "$@"
   ensure_docker
   init_dirs
-  git_prepare_repo
   gen_env_if_missing
 
   # Ensure SMTP defaults and tag keys exist in case .env was user-supplied

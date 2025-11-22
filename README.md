@@ -5,8 +5,8 @@ This repository provides a **POSIX-compliant** installation and update script (`
 - ✅ POSIX shell (`sh`) — no Bashisms
 - ✅ Platform agnostic (Debian/Ubuntu, RHEL/CentOS/Alma/Rocky, Fedora, openSUSE, Arch)
 - ✅ Installs **Docker CE** from official repos (no `docker.io` package)
+- ✅ Self-contained: generates all config files (no git clone needed)
 - ✅ Idempotent: re-run safely to update without breaking existing setup
-- ✅ No `curl | sh` shortcuts
 - ✅ Reverse proxy–friendly (HTTP bound to port **64453**)
 - ✅ Auth **optional by default** (anyone can create rooms)
 - ✅ Creates or updates **admin account** automatically
@@ -16,19 +16,25 @@ This repository provides a **POSIX-compliant** installation and update script (`
 
 ## Quick Start
 
-Clone the repository and run the installer:
+Run the installer directly:
 
 ```sh
-git clone https://github.com/scriptmgr/jitsi
-cd jitsi
-sudo sh ./install.sh
-````
+curl -fsSL https://github.com/scriptmgr/jitsi/raw/refs/heads/main/install.sh | sudo -E sh
+```
 
-That’s it. The script will:
+Or with environment overrides:
+
+```sh
+export PUBLIC_URL=https://meet.example.com
+export ENABLE_AUTH=1
+curl -fsSL https://github.com/scriptmgr/jitsi/raw/refs/heads/main/install.sh | sudo -E sh
+```
+
+That's it. The script will:
 
 1. Install or update Docker CE from the official repositories.
-2. Clone/update this repo to `/opt/jitsi` by default.
-3. Generate a `.env` file with sane defaults.
+2. Create `/opt/jitsi` directory structure.
+3. Generate a `.env` file with sane defaults (or read existing one).
 4. Write a `docker-compose.yml` for the Jitsi Meet stack.
 5. Pull images and start containers.
 6. Create or update the admin account (`administrator`).
@@ -104,12 +110,12 @@ server {
 Re-run the script anytime:
 
 ```sh
-sudo sh ./install.sh
+curl -fsSL https://github.com/scriptmgr/jitsi/raw/refs/heads/main/install.sh | sudo -E sh
 ```
 
 This will:
 
-* Pull the latest repo updates
+* Read existing `.env` to preserve your settings
 * Pull updated Docker images
 * Recreate the stack with no data loss
 * Preserve and/or regenerate secrets as needed
@@ -129,7 +135,7 @@ This will:
 
 * Root privileges (or sudo)
 * One of: `apt`, `dnf`, `yum`, `zypper`, `pacman`
-* `git`, `gpg`, and `openssl` (recommended for password generation)
+* `curl`, `gpg`, and `openssl` (recommended for password generation)
 
 
 ## License
