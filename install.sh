@@ -132,9 +132,9 @@ done
 JITSI_BASE_DIR="${JITSI_BASE_DIR:-/opt/jitsi}"
 ENV_FILE="$JITSI_BASE_DIR/.env"
 COMPOSE_FILE="$JITSI_BASE_DIR/docker-compose.yml"
-JITSI_DATA_DIR="$JITSI_BASE_DIR/.data"
+JITSI_DATA_DIR="$JITSI_BASE_DIR/data"
 CREDS_FILE="$JITSI_BASE_DIR/credentials.txt"
-BACKUP_DIR="$JITSI_BASE_DIR/.backup"
+BACKUP_DIR="$JITSI_BASE_DIR/backup"
 PUBLIC_URL="${PUBLIC_URL:-http://$(hostname -f 2>/dev/null || hostname)}"
 # Extract domain from PUBLIC_URL (strip protocol) - used for auth, email, display
 PUBLIC_DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -e 's|^https\?://||' -e 's|/.*||' -e 's|:.*||')
