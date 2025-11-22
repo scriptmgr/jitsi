@@ -47,8 +47,8 @@ ADMIN_PASS="${ADMIN_PASS:-}"
 SMTP_SERVER_DEFAULT="host.docker.internal"
 SMTP_PORT_DEFAULT="25"
 
-# Docker image tags (track a stable known-good by default; can be overridden)
-JITSI_TAG="${JITSI_TAG:-stable-9965}"     # adjust if you need newer
+# Docker image tags (can be overridden)
+JITSI_TAG="${JITSI_TAG:-unstable}"
 # -----------------------------------
 
 umask 022
@@ -272,14 +272,6 @@ write_compose() {
   backup_file "$COMPOSE_FILE"
   info "Writing docker-compose.yml"
   cat >"$COMPOSE_FILE" <<'YAML'
-version: '3.8'
-
-x-jitsi-common: &jitsi-common
-  restart: unless-stopped
-  image: ${JITSI_IMAGE_PREFIX:-jitsi/}${SERVICE_NAME}:${JITSI_IMAGE_TAG}
-  env_file:
-    - .env
-
 services:
   # XMPP server (Prosody)
   prosody:
