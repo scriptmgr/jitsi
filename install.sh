@@ -399,7 +399,10 @@ services:
       - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
       - JVB_AUTH_USER=${JVB_AUTH_USER}
       - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
-    networks: [ meet ]
+    networks:
+      meet:
+        aliases:
+          - xmpp.meet.jitsi
 
   # Focus (Jicofo)
   jicofo:
@@ -415,6 +418,7 @@ services:
       - JICOFO_AUTH_USER=${JICOFO_AUTH_USER}
       - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
       - ENABLE_AUTH=${ENABLE_AUTH}
+      - XMPP_SERVER=xmpp.meet.jitsi
     networks: [ meet ]
 
   # Videobridge
@@ -433,6 +437,7 @@ services:
       - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
       - JVB_UDP_PORT=${JVB_UDP_PORT}
       - JVB_TCP_HARVESTER_DISABLED=${JVB_TCP_HARVESTER_DISABLED}
+      - XMPP_SERVER=xmpp.meet.jitsi
     networks: [ meet ]
 
   # Web (no TLS here; reverse proxy handles it)
@@ -461,6 +466,7 @@ services:
       - SMTP_PASSWORD=${SMTP_PASSWORD}
       - SMTP_TLS=${SMTP_TLS}
       - SMTP_STARTTLS=${SMTP_STARTTLS}
+      - XMPP_SERVER=xmpp.meet.jitsi
     networks: [ meet ]
 
 networks:
