@@ -25,7 +25,7 @@ curl -fsSL https://github.com/scriptmgr/jitsi/raw/refs/heads/main/install.sh | s
 Or with environment overrides:
 
 ```sh
-export PUBLIC_URL=https://meet.example.com
+export PUBLIC_URL=https://example.com
 export ENABLE_AUTH=1
 curl -fsSL https://github.com/scriptmgr/jitsi/raw/refs/heads/main/install.sh | sudo -E sh
 ```
@@ -42,15 +42,17 @@ That's it. The script will:
 
 ## Defaults
 
-* **Admin user:** `administrator`
-* **Admin password:** Randomly generated if not provided. Saved at:
+- **Admin user:** `administrator`
+- **Admin password:** Randomly generated if not provided. Saved at:
 
-  ```
+  ```text
   /opt/jitsi/credentials.txt
   ```
-* **HTTP port:** `64453` (reverse proxy should terminate TLS and forward here)
-* **Public URL:** `http://$(hostname -f)` unless overridden
-* **Email:** Containers send via `host.docker.internal:25` (relay to host MTA)
+
+- **HTTP port:** `64453` (reverse proxy should terminate TLS and forward here)
+
+- **Public URL:** `http://$(hostname -f)` unless overridden
+- **Email:** Containers send via `host.docker.internal:25` (relay to host MTA)
 
 
 ## Environment Overrides
@@ -59,7 +61,7 @@ You can set environment variables before running `install.sh`:
 
 ```sh
 JITSI_BASE_DIR=/srv/jitsi \
-PUBLIC_URL=https://meet.example.com \
+PUBLIC_URL=https://example.com \
 ENABLE_AUTH=1 \
 ADMIN_USER=myadmin \
 ADMIN_PASS=secretpass \
@@ -69,18 +71,18 @@ sudo -E sh ./install.sh
 
 Key variables:
 
-* `JITSI_BASE_DIR` – installation root (default: `/opt/jitsi`)
-* `PUBLIC_URL` – base URL for Jitsi Meet
-* `HTTP_PORT` – internal HTTP port (default: `64453`)
-* `ENABLE_AUTH` – `0` (default, anyone can create rooms) or `1` (secure domain)
-* `ADMIN_USER` / `ADMIN_PASS` – credentials for Prosody admin
+- `JITSI_BASE_DIR` – installation root (default: `/opt/jitsi`)
+- `PUBLIC_URL` – base URL for Jitsi Meet
+- `HTTP_PORT` – internal HTTP port (default: `64453`)
+- `ENABLE_AUTH` – `0` (default, anyone can create rooms) or `1` (secure domain)
+- `ADMIN_USER` / `ADMIN_PASS` – credentials for Prosody admin
 
 
 ## Reverse Proxy
 
 TLS is not handled inside the container stack. Instead, run a reverse proxy (e.g., Nginx, Caddy, Traefik) that terminates TLS and forwards traffic to:
 
-```
+```text
 http://127.0.0.1:64453
 ```
 
@@ -91,10 +93,10 @@ http://127.0.0.1:64453
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name meet.example.com;
+    server_name example.com *.example.com;
 
-    ssl_certificate /etc/letsencrypt/live/meet.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/meet.example.com/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
 
     location / {
         proxy_pass http://127.0.0.1:64453;
@@ -112,7 +114,7 @@ server {
 ### Caddy
 
 ```caddyfile
-meet.example.com {
+example.com {
     reverse_proxy 127.0.0.1:64453
 }
 ```
@@ -122,7 +124,7 @@ meet.example.com {
 ```yaml
 labels:
   - "traefik.enable=true"
-  - "traefik.http.routers.jitsi.rule=Host(`meet.example.com`)"
+  - "traefik.http.routers.jitsi.rule=Host(`example.com`)"
   - "traefik.http.routers.jitsi.tls.certresolver=letsencrypt"
   - "traefik.http.services.jitsi.loadbalancer.server.port=64453"
 ```
@@ -131,11 +133,11 @@ labels:
 
 ```apache
 <VirtualHost *:443>
-    ServerName meet.example.com
+    ServerName example.com
 
     SSLEngine on
-    SSLCertificateFile /etc/letsencrypt/live/meet.example.com/fullchain.pem
-    SSLCertificateKeyFile /etc/letsencrypt/live/meet.example.com/privkey.pem
+    SSLCertificateFile /etc/letsencrypt/live/example.com/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/example.com/privkey.pem
 
     ProxyPreserveHost On
     ProxyPass / http://127.0.0.1:64453/
@@ -159,27 +161,27 @@ curl -fsSL https://github.com/scriptmgr/jitsi/raw/refs/heads/main/install.sh | s
 
 This will:
 
-* Read existing `.env` to preserve your settings
-* Pull updated Docker images
-* Recreate the stack with no data loss
-* Preserve and/or regenerate secrets as needed
-* Update the admin account password if changed
+- Read existing `.env` to preserve your settings
+- Pull updated Docker images
+- Recreate the stack with no data loss
+- Preserve and/or regenerate secrets as needed
+- Update the admin account password if changed
 
 
 ## Files & Layout
 
-* `/opt/jitsi/.env` – main configuration
-* `/opt/jitsi/docker-compose.yml` – container stack definition
-* `/opt/jitsi/config/` – persistent config mounted into containers
-* `/opt/jitsi/credentials.txt` – saved admin credentials
-* `/opt/jitsi/.backup/` – timestamped backups of replaced files
+- `/opt/jitsi/.env` – main configuration
+- `/opt/jitsi/docker-compose.yml` – container stack definition
+- `/opt/jitsi/config/` – persistent config mounted into containers
+- `/opt/jitsi/credentials.txt` – saved admin credentials
+- `/opt/jitsi/.backup/` – timestamped backups of replaced files
 
 
 ## Requirements
 
-* Root privileges (or sudo)
-* One of: `apt`, `dnf`, `yum`, `zypper`, `pacman`
-* `curl`, `gpg`, and `openssl` (recommended for password generation)
+- Root privileges (or sudo)
+- One of: `apt`, `dnf`, `yum`, `zypper`, `pacman`
+- `curl`, `gpg`, and `openssl` (recommended for password generation)
 
 
 ## License
@@ -189,6 +191,6 @@ MIT. See [LICENSE](LICENSE).
 
 ## Notes
 
-* Designed for **reverse proxy** use only. Jitsi’s internal web container runs plain HTTP.
-* `ENABLE_AUTH=0` allows open room creation (default). Switch to `ENABLE_AUTH=1` in `.env` for secure domain.
-* Uses the **official Docker Hub images** (`jitsi/web`, `jitsi/prosody`, `jitsi/jicofo`, `jitsi/jvb`).
+- Designed for **reverse proxy** use only. Jitsi’s internal web container runs plain HTTP.
+- `ENABLE_AUTH=0` allows open room creation (default). Switch to `ENABLE_AUTH=1` in `.env` for secure domain.
+- Uses the **official Docker Hub images** (`jitsi/web`, `jitsi/prosody`, `jitsi/jicofo`, `jitsi/jvb`).
