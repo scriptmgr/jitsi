@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//root/.local/tmp/casjaysdevdocker/prosody-inspect-AFZ093/etc/prosody/**)",
+      "Read(//root/.local/tmp/casjaysdevdocker/prosody-inspect-AFZ093/etc/s6/services/**)",
+      "Read(//root/.local/tmp/casjaysdevdocker/prosody-inspect-AFZ093/usr/local/bin/**)",
+      "Read(//root/.local/tmp/casjaysdevdocker/prosody-inspect-AFZ093/**)"
+    ]
+  }
+}

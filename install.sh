@@ -539,7 +539,7 @@ __write_compose() {
 services:
   prosody:
     container_name: jitsi-prosody
-    image: casjaysdevdocker/prosody:latest
+    image: ghcr.io/casjaysdevdocker/prosody:latest
     restart: unless-stopped
     pull_policy: always
     ports:
