@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+##@Version           :  YYYYMMDDHHMM-git
+# @@Author           :  Jason Hempstead
+# @@Contact          :  git-admin@casjaysdev.pro
+# @@License          :  MIT or LICENSE.md
+# @@ReadME           :  jitsi-stack --help
+# @@Copyright        :  Copyright: (c) 2026 Jason Hempstead, Casjays Developments
+# @@Created          :  Tuesday, May 19, 2026 09:29 EDT
+# @@File             :  jitsi-stack
+# @@Description      :  Manage the Jitsi Meet Docker stack
+# @@Changelog        :  Initial version — extracted from install.sh
+# @@TODO             :
+# @@Other            :
+# @@Resource         :
+# @@Terminal App     :  yes
+# @@sudo/root        :  no
+# @@Template         :  shell/bash
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# shellcheck disable=SC1001,SC1003,SC2001,SC2003,SC2016,SC2031,SC2090,SC2115,SC2120,SC2155,SC2199,SC2229,SC2317,SC2329
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+APPNAME="${0##*/}"
+VERSION="YYYYMMDDHHMM-git"
+RUN_USER="${USER}"
+SET_UID="${UID}"
+SCRIPT_SRC_DIR="${BASH_SOURCE%/*}"
+
+set -euo pipefail
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Configuration
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+JITSISTACK_BASE_DIR="${JITSI_BASE_DIR:-/opt/jitsi}"
+JITSISTACK_COMPOSE_FILE="${JITSISTACK_BASE_DIR}/docker-compose.yml"
+JITSISTACK_ENV_FILE="${JITSISTACK_BASE_DIR}/.env"
+JITSISTACK_BACKUP_DIR="${JITSISTACK_BASE_DIR}/backup"
+JITSISTACK_DEBUG="${JITSISTACK_DEBUG:-0}"
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Standard utility functions (from script_conventions.md)
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+__determine_hostname_name() {
+  local fqdn
+  fqdn="$(hostname -f 2>/dev/null)"
+  if [[ -n "$fqdn" ]]; then
+    printf '%s\n' "$fqdn"
+    return 0
+  fi
+  return 1
+}
+
+__does_host_have_valid_ip6() {
+  local addr
+  addr="$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/ {print $2; exit}')"
+  [[ -n "$addr" ]] && return 0
+  return 1
+}
+
+__is_ip4_public() {
+  local ip="${1:-}"
+  [[ -z "$ip" ]] && return 1
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local a b c d
+  IFS='.' read -r a b c d <<< "$ip"
+  (( a == 0 )) && return 1
+  (( a == 10 )) && return 1
+  (( a == 127 )) && return 1
+  (( a == 100 && b >= 64 && b <= 127 )) && return 1
+  (( a == 169 && b == 254 )) && return 1
+  (( a == 172 && b >= 16 && b <= 31 )) && return 1
+  (( a == 192 && b == 0 && c == 0 )) && return 1
+  (( a == 192 && b == 0 && c == 2 )) && return 1
+  (( a == 192 && b == 168 )) && return 1
+  (( a == 198 && b == 51 && c == 100 )) && return 1
+  (( a == 203 && b == 0 && c == 113 )) && return 1
+  (( a >= 224 )) && return 1
+  return 0
+}
+
+__get_hosts_ip4_address() {
+  if [[ -n "${IP4_ADDRESS:-}" ]]; then
+    printf '%s\n' "$IP4_ADDRESS"
+    return 0
+  fi
+  local ip url
+  for url in "https://ifcfg.us/ip" "https://ifconfig.co/ip" "https://checkip.amazonaws.com"; do
+    ip="$(curl -4 -q -LSs --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
+    if [[ -n "$ip" ]] && __is_ip4_public "$ip"; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
+__is_ip6_public() {
+  local ip="${1:-}"
+  [[ -z "$ip" ]] && return 1
+  ip="${ip%%\%*}"
+  local low="${ip,,}"
+  [[ "$low" == "::" || "$low" == "::1" ]] && return 1
+  [[ "$low" =~ ^fe[89ab][0-9a-f]?: ]] && return 1
+  [[ "$low" =~ ^f[cd] ]] && return 1
+  [[ "$low" =~ ^::ffff: ]] && return 1
+  [[ "$low" =~ ^[23] ]] || return 1
+  return 0
+}
+
+__get_hosts_ip6_address() {
+  __does_host_have_valid_ip6 || return 1
+  if [[ -n "${IP6_ADDRESS:-}" ]]; then
+    printf '%s\n' "$IP6_ADDRESS"
+    return 0
+  fi
+  local ip url
+  for url in "https://ifcfg.us/ip" "https://ifconfig.co/ip" "https://api6.ipify.org"; do
+    ip="$(curl -6 -q -LSs --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
+    if [[ -n "$ip" ]] && __is_ip6_public "$ip"; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Utility functions
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+__die()      { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+__info()     { printf 'INFO:  %s\n' "$*"; }
+__warn()     { printf 'WARN:  %s\n' "$*" >&2; }
+__need_cmd() { command -v "$1" &>/dev/null; }
+
+__require_installed() {
+  [[ -f "${JITSISTACK_COMPOSE_FILE}" ]] || __die "Jitsi not installed. Run install.sh first."
+}
+
+# Wrapper: prefers docker compose plugin, falls back to docker-compose
+__docker_compose() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose -f "${JITSISTACK_COMPOSE_FILE}" "$@"
+  else
+    docker-compose -f "${JITSISTACK_COMPOSE_FILE}" "$@"
+  fi
+}
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Help and version
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+__help() {
+  cat <<EOF
+${APPNAME} v${VERSION} — Manage the Jitsi Meet Docker stack
+
+Usage: ${APPNAME} [OPTIONS] <command> [args...]
+
+Commands:
+  start              Pull images and start all containers
+  stop               Stop all containers (preserves data)
+  restart            Restart all containers
+  status             Show container status and connection info
+  logs [service]     Tail logs (all services or a named one)
+  update             Pull latest images and restart
+  backup             Backup config and data to a timestamped archive
+
+Options:
+  -h, --help       Show this help
+  -v, --version    Show version
+  --debug          Enable trace output
+  --no-color       Disable color output
+
+Environment:
+  JITSI_BASE_DIR   Installation directory (default: /opt/jitsi)
+
+Examples:
+  ${APPNAME} start
+  ${APPNAME} status
+  ${APPNAME} logs prosody
+  ${APPNAME} update
+  ${APPNAME} backup
+EOF
+}
+
+__version() {
+  printf '%s\n' "${APPNAME} v${VERSION}"
+}
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Stack commands
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+__stack_start() {
+  __info "Pulling latest images..."
+  __docker_compose pull
+  __info "Starting Jitsi stack..."
+  __docker_compose up -d
+  __info "Stack started."
+}
+
+__stack_stop() {
+  __info "Stopping Jitsi stack..."
+  __docker_compose stop
+  __info "Stack stopped."
+}
+
+__stack_restart() {
+  __info "Restarting Jitsi stack..."
+  __docker_compose restart
+  __info "Stack restarted."
+}
+
+__stack_status() {
+  local public_url="" http_port="" enable_auth=""
+
+  # Read key values from .env
+  if [[ -f "${JITSISTACK_ENV_FILE}" ]]; then
+    while IFS='=' read -r key value; do
+      case "${key}" in
+        PUBLIC_URL)   public_url="${value}" ;;
+        HTTP_PORT)    http_port="${value}" ;;
+        ENABLE_AUTH)  enable_auth="${value}" ;;
+      esac
+    done < "${JITSISTACK_ENV_FILE}"
+  fi
+
+  local fqdn ip4 ip6
+  fqdn="$(__determine_hostname_name 2>/dev/null || hostname)"
+  ip4="$(__get_hosts_ip4_address 2>/dev/null || true)"
+  ip6="$(__get_hosts_ip6_address 2>/dev/null || true)"
+
+  printf '\n'
+  printf '============================================================\n'
+  printf 'Jitsi Meet Stack Status\n'
+  printf '============================================================\n'
+  printf 'Hostname:        %s\n' "${fqdn}"
+  [[ -n "${ip4}" ]] && printf 'IPv4:            %s\n' "${ip4}"
+  [[ -n "${ip6}" ]] && printf 'IPv6:            %s\n' "${ip6}"
+  [[ -n "${public_url}" ]] && printf 'Public URL:      %s\n' "${public_url}"
+  [[ -n "${http_port}" ]] && printf 'HTTP Port:       %s\n' "${http_port}"
+  [[ -n "${enable_auth}" ]] && printf 'Auth Required:   %s\n' "${enable_auth}"
+  printf '------------------------------------------------------------\n'
+  __docker_compose ps
+  printf '\n'
+}
+
+__stack_logs() {
+  local service="${1:-}"
+  if [[ -n "${service}" ]]; then
+    __docker_compose logs -f "${service}"
+  else
+    __docker_compose logs -f
+  fi
+}
+
+__stack_update() {
+  __info "Pulling latest images..."
+  __docker_compose pull
+  __info "Restarting with updated images..."
+  __docker_compose up -d
+  __info "Update complete."
+}
+
+__stack_backup() {
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
+  local archive="${JITSISTACK_BACKUP_DIR}/jitsi-backup-${ts}.tar.gz"
+  mkdir -p "${JITSISTACK_BACKUP_DIR}"
+
+  __info "Creating backup: ${archive}"
+  tar -czf "${archive}" \
+    -C "${JITSISTACK_BASE_DIR}" \
+    --exclude="backup" \
+    . 2>/dev/null || __warn "Some files could not be archived (check permissions)."
+
+  __info "Backup saved: ${archive}"
+}
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Entry point
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+__main() {
+  __need_cmd docker || __die "docker is not installed or not in PATH."
+
+  local cmd="${1:-}"
+  shift || true
+
+  # status is the only command that doesn't strictly require the stack running
+  [[ "${cmd}" != "status" ]] && __require_installed
+
+  case "${cmd}" in
+    start)    __stack_start ;;
+    stop)     __stack_stop ;;
+    restart)  __stack_restart ;;
+    status)   __stack_status ;;
+    logs)     __stack_logs "$@" ;;
+    update)   __stack_update ;;
+    backup)   __stack_backup ;;
+    "")  __help; exit 1 ;;
+    *)   __die "Unknown command: ${cmd}. Use: start, stop, restart, status, logs, update, backup" ;;
+  esac
+}
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Argument parsing
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+_OPTS="$(getopt -o hv -l help,version,debug,no-color -n "${APPNAME}" -- "$@")" \
+  || { __help; exit 1; }
+eval set -- "${_OPTS}"
+while true; do
+  case "$1" in
+    -h|--help)    __help; exit 0 ;;
+    -v|--version) __version; exit 0 ;;
+    --debug)      JITSISTACK_DEBUG=1; shift ;;
+    --no-color)   NO_COLOR=1; shift ;;
+    --)           shift; break ;;
+    *)            break ;;
+  esac
+done
+
+[[ "${JITSISTACK_DEBUG}" == "1" ]] && set -x
+
+__main "$@"
+
+# ex: ts=2 sw=2 et filetype=sh

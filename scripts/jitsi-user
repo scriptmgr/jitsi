@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+##@Version           :  YYYYMMDDHHMM-git
+# @@Author           :  Jason Hempstead
+# @@Contact          :  git-admin@casjaysdev.pro
+# @@License          :  MIT or LICENSE.md
+# @@ReadME           :  jitsi-user --help
+# @@Copyright        :  Copyright: (c) 2026 Jason Hempstead, Casjays Developments
+# @@Created          :  Tuesday, May 19, 2026 09:29 EDT
+# @@File             :  jitsi-user
+# @@Description      :  Manage Jitsi Meet user accounts via Prosody
+# @@Changelog        :  Initial version — extracted from install.sh
+# @@TODO             :
+# @@Other            :
+# @@Resource         :
+# @@Terminal App     :  yes
+# @@sudo/root        :  no
+# @@Template         :  shell/bash
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# shellcheck disable=SC1001,SC1003,SC2001,SC2003,SC2016,SC2031,SC2090,SC2115,SC2120,SC2155,SC2199,SC2229,SC2317,SC2329
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+APPNAME="${0##*/}"
+VERSION="YYYYMMDDHHMM-git"
+RUN_USER="${USER}"
+SET_UID="${UID}"
+SCRIPT_SRC_DIR="${BASH_SOURCE%/*}"
+
+set -euo pipefail
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Configuration
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+JITSIUSER_BASE_DIR="${JITSI_BASE_DIR:-/opt/jitsi}"
+JITSIUSER_ENV_FILE="${JITSIUSER_BASE_DIR}/.env"
+JITSIUSER_CONFIG_DIR="${JITSI_CONFIG_DIR:-${JITSIUSER_BASE_DIR}/rootfs/config}"
+JITSIUSER_CONTAINER="jitsi-prosody"
+JITSIUSER_AUTH_DOMAIN="auth.meet.jitsi"
+JITSIUSER_DEBUG="${JITSIUSER_DEBUG:-0}"
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Utility functions
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+__die()      { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+__info()     { printf 'INFO:  %s\n' "$*"; }
+__warn()     { printf 'WARN:  %s\n' "$*" >&2; }
+__need_cmd() { command -v "$1" &>/dev/null; }
+
+# Load JITSI_CONFIG_DIR from the installed .env when present
+__load_env() {
+  [[ -f "${JITSIUSER_ENV_FILE}" ]] || return 0
+  local key value
+  while IFS='=' read -r key value; do
+    case "${key}" in
+      \#*|"") continue ;;
+      JITSI_CONFIG_DIR) JITSIUSER_CONFIG_DIR="${value}" ;;
+    esac
+  done < "${JITSIUSER_ENV_FILE}"
+}
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Help and version
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+__help() {
+  cat <<EOF
+${APPNAME} v${VERSION} — Manage Jitsi Meet user accounts
+
+Usage: ${APPNAME} [OPTIONS] <command> [args...]
+
+Commands:
+  add  <username> [password]   Add a new user (prompts for password if omitted)
+  del  <username>              Delete a user
+  pass <username>              Change a user's password
+  list                         List all registered users
+
+Options:
+  -h, --help       Show this help
+  -v, --version    Show version
+  --debug          Enable trace output
+  --no-color       Disable color output
+
+Environment:
+  JITSI_BASE_DIR   Installation directory (default: /opt/jitsi)
+  JITSI_CONFIG_DIR Prosody config directory (default: auto-detected from .env)
+
+Examples:
+  ${APPNAME} add alice
+  ${APPNAME} add alice s3cret
+  ${APPNAME} del alice
+  ${APPNAME} pass alice
+  ${APPNAME} list
+EOF
+}
+
+__version() {
+  printf '%s\n' "${APPNAME} v${VERSION}"
+}
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# User management commands
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+__user_add() {
+  local username="${1:-}"
+  local password="${2:-}"
+  [[ -n "${username}" ]] || __die "Usage: ${APPNAME} add <username> [password]"
+  # Strip domain part if provided
+  username="${username%%@*}"
+  if [[ -z "${password}" ]]; then
+    if [[ -t 0 ]]; then
+      printf 'Password for %s: ' "${username}"
+      stty -echo
+      read -r password
+      stty echo
+      printf '\n'
+    else
+      __die "No password provided and stdin is not a terminal."
+    fi
+  fi
+  [[ -n "${password}" ]] || __die "Password cannot be empty."
+  docker exec "${JITSIUSER_CONTAINER}" \
+    prosodyctl --config /config/prosody.cfg.lua register \
+    "${username}" "${JITSIUSER_AUTH_DOMAIN}" "${password}" 2>/dev/null \
+    && __info "User '${username}' created." \
+    || __die "Failed to create user '${username}'."
+}
+
+__user_del() {
+  local username="${1:-}"
+  [[ -n "${username}" ]] || __die "Usage: ${APPNAME} del <username>"
+  username="${username%%@*}"
+  # prosodyctl deluser requires mod_admin_shell which is not enabled in the
+  # casjaysdevdocker/prosody image. The flat-file backend stores each account as
+  # auth%2emeet%2ejitsi/accounts/<username>.dat so direct removal is equivalent.
+  local dat_dir
+  dat_dir="/config/data/${JITSIUSER_AUTH_DOMAIN//./%2e}/accounts"
+  docker exec "${JITSIUSER_CONTAINER}" \
+    rm -f "${dat_dir}/${username}.dat" 2>/dev/null \
+    && __info "User '${username}' deleted." \
+    || __die "Failed to delete user '${username}'."
+}
+
+__user_pass() {
+  local username="${1:-}"
+  [[ -n "${username}" ]] || __die "Usage: ${APPNAME} pass <username>"
+  username="${username%%@*}"
+  local password
+  if [[ -t 0 ]]; then
+    printf 'New password for %s: ' "${username}"
+    stty -echo
+    read -r password
+    stty echo
+    printf '\n'
+  else
+    __die "stdin is not a terminal — cannot prompt for password."
+  fi
+  [[ -n "${password}" ]] || __die "Password cannot be empty."
+  docker exec "${JITSIUSER_CONTAINER}" \
+    prosodyctl --config /config/prosody.cfg.lua passwd \
+    "${username}" "${JITSIUSER_AUTH_DOMAIN}" "${password}" 2>/dev/null \
+    && __info "Password updated for '${username}'." \
+    || __die "Failed to update password for '${username}'."
+}
+
+__user_list() {
+  __info "Registered users on ${JITSIUSER_AUTH_DOMAIN}:"
+  local dat_dir
+  dat_dir="/config/data/${JITSIUSER_AUTH_DOMAIN//./%2e}/accounts"
+  docker exec "${JITSIUSER_CONTAINER}" \
+    ls "${dat_dir}" 2>/dev/null \
+    | sed 's/\.dat$//' \
+    || printf '(no users found)\n'
+}
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Entry point
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+__main() {
+  __need_cmd docker || __die "docker is not installed or not in PATH."
+  [[ -f "${JITSIUSER_BASE_DIR}/docker-compose.yml" ]] || __die "Jitsi not installed. Run install.sh first."
+
+  local cmd="${1:-}"
+  shift || true
+
+  case "${cmd}" in
+    add)                    __user_add "$@" ;;
+    del|delete|rm)          __user_del "$@" ;;
+    pass|passwd|password)   __user_pass "$@" ;;
+    list|ls)                __user_list ;;
+    "")  __help; exit 1 ;;
+    *)   __die "Unknown command: ${cmd}. Use: add, del, pass, list" ;;
+  esac
+}
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Argument parsing
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+_OPTS="$(getopt -o hv -l help,version,debug,no-color -n "${APPNAME}" -- "$@")" \
+  || { __help; exit 1; }
+eval set -- "${_OPTS}"
+while true; do
+  case "$1" in
+    -h|--help)    __help; exit 0 ;;
+    -v|--version) __version; exit 0 ;;
+    --debug)      JITSIUSER_DEBUG=1; shift ;;
+    --no-color)   NO_COLOR=1; shift ;;
+    --)           shift; break ;;
+    *)            break ;;
+  esac
+done
+
+[[ "${JITSIUSER_DEBUG}" == "1" ]] && set -x
+
+__load_env
+__main "$@"
+
+# ex: ts=2 sw=2 et filetype=sh

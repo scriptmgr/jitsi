@@ -1,489 +1,500 @@
-#!/bin/sh
-# shellcheck shell=sh
-# shellcheck disable=SC1090
-##@Version 202605190728-git
-# =============================================================================
-# Jitsi Meet Docker Installer
-# =============================================================================
-# POSIX-compliant installer for running Jitsi Meet in Docker containers
-# Supports Debian/Ubuntu, RHEL/CentOS/Fedora, openSUSE, and Arch Linux
-# Uses official Docker CE repositories for consistent installations
-#
-# Repository: https://github.com/scriptmgr/jitsi
-# License: MIT
-# =============================================================================
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+##@Version           :  202605190929-git
+# @@Author           :  Jason Hempstead
+# @@Contact          :  git-admin@casjaysdev.pro
+# @@License          :  MIT or LICENSE.md
+# @@ReadME           :  install.sh --help
+# @@Copyright        :  Copyright: (c) 2026 Jason Hempstead, Casjays Developments
+# @@Created          :  Tuesday, May 19, 2026 09:29 EDT
+# @@File             :  install.sh
+# @@Description      :  POSIX-compliant installer for Jitsi Meet on Docker
+# @@Changelog        :  Convert to bash; extract operational scripts; use standard utility functions
+# @@TODO             :
+# @@Other            :
+# @@Resource         :
+# @@Terminal App     :  yes
+# @@sudo/root        :  yes
+# @@Template         :  shell/bash
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# shellcheck disable=SC1001,SC1003,SC2001,SC2003,SC2016,SC2031,SC2090,SC2115,SC2120,SC2155,SC2199,SC2229,SC2317,SC2329
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 
-# Enable strict error handling
-# -e: Exit on any command failure
-# -u: Treat unset variables as errors
-set -eu
+APPNAME="${0##*/}"
+VERSION="202605190929-git"
+RUN_USER="${USER}"
+SET_UID="${UID}"
+SCRIPT_SRC_DIR="${BASH_SOURCE%/*}"
 
-VERSION="202605190728-git"
-DEBUG="${DEBUG:-0}"
+set -euo pipefail
+
+INSTALL_DEBUG="${INSTALL_DEBUG:-0}"
 NO_COLOR="${NO_COLOR:-}"
 
-# =============================================================================
-# Utility Functions
-# =============================================================================
-# Common helper functions used throughout the script for consistent
-# output formatting, command detection, and password generation
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Standard utility functions (from script_conventions.md)
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 
-# Check if a command exists in PATH
-__need_cmd() { command -v "$1" >/dev/null 2>&1; }
+__determine_hostname_name() {
+  local fqdn
+  fqdn="$(hostname -f 2>/dev/null)"
+  if [[ -n "$fqdn" ]]; then
+    printf '%s\n' "$fqdn"
+    return 0
+  fi
+  return 1
+}
 
-# Print error message and exit with failure status
-__die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+__download_all_scripts_from_github() {
+  local dest="${1:?Usage: __download_all_scripts_from_github <dest_dir>}"
+  local GITHUB_RAW_REPO="${GITHUB_RAW_REPO:-scriptmgr/jitsi}"
+  local api_base="https://api.github.com/repos/${GITHUB_RAW_REPO}/contents/scripts"
+  local raw_base="https://raw.githubusercontent.com/${GITHUB_RAW_REPO}/main/scripts"
+  local page=1
+  local files file response
 
-# Print informational message to stdout
-__info() { printf 'INFO: %s\n' "$*"; }
+  mkdir -p "$dest" || return 1
 
-# Print warning message to stderr
-__warn() { printf 'WARN: %s\n' "$*" >&2; }
+  while :; do
+    response="$(curl -q -LSs "${api_base}?per_page=100&page=${page}")" || return 1
+    mapfile -t files < <(printf '%s' "$response" | jq -r '.[] | select(.type=="file") | .name')
+    [[ ${#files[@]} -eq 0 ]] && break
+    for file in "${files[@]}"; do
+      curl -q -LSs "${raw_base}/${file}" -o "${dest}/${file}" || return 1
+      chmod 755 "${dest}/${file}"
+    done
+    (( ${#files[@]} < 100 )) && break
+    (( page++ ))
+  done
+}
 
-# Generate a timestamp for backup file naming
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Utility functions
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+__need_cmd() { command -v "$1" &>/dev/null; }
+__die()      { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+__info()     { printf 'INFO:  %s\n' "$*"; }
+__warn()     { printf 'WARN:  %s\n' "$*" >&2; }
 __timestamp() { date +%Y%m%d-%H%M%S; }
 
 # Generate a random 24-character alphanumeric password
-# Uses openssl if available, falls back to /dev/urandom
 __randpass() {
-	if __need_cmd openssl; then
-		openssl rand -base64 36 | tr -dc 'A-Za-z0-9' | head -c 24
-	else
-		dd if=/dev/urandom bs=1 count=48 2>/dev/null | od -An -tx1 | tr -dc 'A-Za-z0-9' | head -c 24
-	fi
+  if __need_cmd openssl; then
+    openssl rand -base64 36 | tr -dc 'A-Za-z0-9' | head -c 24
+  else
+    dd if=/dev/urandom bs=1 count=48 2>/dev/null | od -An -tx1 | tr -dc 'A-Za-z0-9' | head -c 24
+  fi
 }
 
-# Ensure script is running as root, re-exec with sudo if needed
-# Preserves environment variables with -E flag
+# Re-exec with sudo when not root, preserving environment
 __require_root() {
-	if [ "$(id -u)" -ne 0 ]; then
-		if __need_cmd sudo; then
-			exec sudo -E -- "$0" "$@"
-		else
-			__die "Must be run as root or with sudo."
-		fi
-	fi
+  if [[ "$(id -u)" -ne 0 ]]; then
+    if __need_cmd sudo; then
+      exec sudo -E -- "$0" "$@"
+    else
+      __die "Must be run as root or with sudo."
+    fi
+  fi
 }
 
-# =============================================================================
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Configuration
-# =============================================================================
-# Initialize all configuration variables with sensible defaults
-# Values can be overridden via environment variables before running
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 
-# Initialize all configuration variables with defaults
-# Sets up directory paths, URLs, authentication, branding, and feature flags
 __init_config() {
-	# Directory structure for installation
-	JITSI_BASE_DIR="${JITSI_BASE_DIR:-/opt/jitsi}"
-	ENV_FILE="$JITSI_BASE_DIR/.env"
-	COMPOSE_FILE="$JITSI_BASE_DIR/docker-compose.yml"
-	JITSI_DATA_DIR="$JITSI_BASE_DIR/rootfs/data"
-	JITSI_CONFIG_DIR="$JITSI_BASE_DIR/rootfs/config"
-	CREDS_FILE="$JITSI_BASE_DIR/credentials.txt"
-	BACKUP_DIR="$JITSI_BASE_DIR/backup"
+  # Directory structure for installation
+  JITSI_BASE_DIR="${JITSI_BASE_DIR:-/opt/jitsi}"
+  ENV_FILE="${JITSI_BASE_DIR}/.env"
+  COMPOSE_FILE="${JITSI_BASE_DIR}/docker-compose.yml"
+  JITSI_DATA_DIR="${JITSI_BASE_DIR}/rootfs/data"
+  JITSI_CONFIG_DIR="${JITSI_BASE_DIR}/rootfs/config"
+  CREDS_FILE="${JITSI_BASE_DIR}/credentials.txt"
+  BACKUP_DIR="${JITSI_BASE_DIR}/backup"
 
-	# Extract public URL and domain from environment or hostname
-	PUBLIC_URL="${PUBLIC_URL:-http://$(hostname -f 2>/dev/null || hostname)}"
-	# Strip trailing slash — a common paste error that breaks BOSH/WebSocket URLs
-	PUBLIC_URL=$(printf '%s' "$PUBLIC_URL" | sed 's|/$||')
-	# Validate scheme — must be http:// or https://
-	case "$PUBLIC_URL" in
-		http://*|https://*) ;;
-		*) __die "PUBLIC_URL must start with http:// or https:// (got: $PUBLIC_URL)" ;;
-	esac
-	# Warn when scheme is http: the reverse proxy must serve HTTPS and send
-	# X-Forwarded-Proto: https, otherwise Jitsi generates mixed-content URLs.
-	case "$PUBLIC_URL" in
-		http://*) __warn "PUBLIC_URL uses http://. Ensure your reverse proxy sends X-Forwarded-Proto: https when terminating TLS, or set PUBLIC_URL=https://..." ;;
-	esac
-	PUBLIC_DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -e 's|^https\?://||' -e 's|/.*||' -e 's|:.*||')
+  # Resolve public URL: use env var or fall back to detected FQDN
+  local _host
+  _host="$(__determine_hostname_name 2>/dev/null || hostname)"
+  PUBLIC_URL="${PUBLIC_URL:-http://${_host}}"
+  # Strip trailing slash — a common paste error that breaks BOSH/WebSocket URLs
+  PUBLIC_URL="${PUBLIC_URL%/}"
+  # Validate scheme — must be http:// or https://
+  case "${PUBLIC_URL}" in
+    http://*|https://*) ;;
+    *) __die "PUBLIC_URL must start with http:// or https:// (got: ${PUBLIC_URL})" ;;
+  esac
+  # Warn when scheme is http: the reverse proxy must serve HTTPS and send
+  # X-Forwarded-Proto: https, otherwise Jitsi generates mixed-content URLs.
+  case "${PUBLIC_URL}" in
+    http://*) __warn "PUBLIC_URL uses http://. Ensure your reverse proxy sends X-Forwarded-Proto: https when terminating TLS, or set PUBLIC_URL=https://..." ;;
+  esac
+  PUBLIC_DOMAIN="${PUBLIC_URL#*://}"
+  PUBLIC_DOMAIN="${PUBLIC_DOMAIN%%/*}"
+  PUBLIC_DOMAIN="${PUBLIC_DOMAIN%%:*}"
 
-	# Auto-detect timezone from system configuration
-	HOST_TZ="America/New_York"
-	[ -f /etc/timezone ] && read -r HOST_TZ < /etc/timezone
-	[ -L /etc/localtime ] && { _rl=$(readlink /etc/localtime); HOST_TZ="${_rl##*/zoneinfo/}"; unset _rl; }
-	TZ="${TZ:-$HOST_TZ}"
+  # Auto-detect timezone from system configuration
+  HOST_TZ="America/New_York"
+  [[ -f /etc/timezone ]] && read -r HOST_TZ < /etc/timezone
+  if [[ -L /etc/localtime ]]; then
+    local _rl
+    _rl="$(readlink /etc/localtime)"
+    HOST_TZ="${_rl##*/zoneinfo/}"
+  fi
+  TZ="${TZ:-${HOST_TZ}}"
 
-	# Core server settings
-	# HTTP_PORT: Internal port for reverse proxy to connect to
-	# ENABLE_AUTH: 0=open (anyone can create rooms), 1=auth required
-	HTTP_PORT="${HTTP_PORT:-64453}"
-	ENABLE_AUTH="${ENABLE_AUTH:-0}"
-	AUTH_TYPE="${AUTH_TYPE:-internal}"
-	ADMIN_USER="${ADMIN_USER:-administrator}"
-	# Strip domain part if provided (user@domain -> user)
-	ADMIN_USER=$(printf '%s' "$ADMIN_USER" | sed 's/@.*//')
-	ADMIN_PASS="${ADMIN_PASS:-}"
-	JITSI_TAG="${JITSI_TAG:-unstable}"
+  # Core server settings
+  HTTP_PORT="${HTTP_PORT:-64453}"
+  ENABLE_AUTH="${ENABLE_AUTH:-0}"
+  AUTH_TYPE="${AUTH_TYPE:-internal}"
+  ADMIN_USER="${ADMIN_USER:-administrator}"
+  # Strip domain part if provided (user@domain -> user)
+  ADMIN_USER="${ADMIN_USER%%@*}"
+  ADMIN_PASS="${ADMIN_PASS:-}"
+  JITSI_TAG="${JITSI_TAG:-unstable}"
 
-	# SMTP defaults for email delivery via host MTA
-	SMTP_SERVER_DEFAULT="host.docker.internal"
-	SMTP_PORT_DEFAULT="25"
+  # SMTP defaults for email delivery via host MTA
+  SMTP_SERVER_DEFAULT="host.docker.internal"
+  SMTP_PORT_DEFAULT="25"
 
-	# Generate random passwords for internal component authentication
-	JVB_AUTH_PASSWORD="$(__randpass)"
-	JICOFO_AUTH_PASSWORD="$(__randpass)"
+  # Generate random passwords for internal component authentication
+  JVB_AUTH_PASSWORD="$(__randpass)"
+  JICOFO_AUTH_PASSWORD="$(__randpass)"
 
-	# Branding customization
-	APP_NAME="${APP_NAME:-CasjaysDev Meet}"
-	PROVIDER_NAME="${PROVIDER_NAME:-CasjaysDev}"
-	NATIVE_APP_NAME="${NATIVE_APP_NAME:-$APP_NAME}"
-	DEFAULT_LANGUAGE="${DEFAULT_LANGUAGE:-en}"
+  # Branding customization
+  APP_NAME="${APP_NAME:-CasjaysDev Meet}"
+  PROVIDER_NAME="${PROVIDER_NAME:-CasjaysDev}"
+  NATIVE_APP_NAME="${NATIVE_APP_NAME:-${APP_NAME}}"
+  DEFAULT_LANGUAGE="${DEFAULT_LANGUAGE:-en}"
 
-	# UI feature toggles
-	ENABLE_WELCOME_PAGE="${ENABLE_WELCOME_PAGE:-true}"
-	ENABLE_PREJOIN_PAGE="${ENABLE_PREJOIN_PAGE:-true}"
-	ENABLE_LOBBY="${ENABLE_LOBBY:-true}"
-	ENABLE_CLOSE_PAGE="${ENABLE_CLOSE_PAGE:-false}"
-	DISABLE_AUDIO_LEVELS="${DISABLE_AUDIO_LEVELS:-false}"
-	ENABLE_NOISY_MIC_DETECTION="${ENABLE_NOISY_MIC_DETECTION:-true}"
-	ENABLE_BREAKOUT_ROOMS="${ENABLE_BREAKOUT_ROOMS:-true}"
-	ENABLE_REGISTRATION="${ENABLE_REGISTRATION:-true}"
+  # UI feature toggles
+  ENABLE_WELCOME_PAGE="${ENABLE_WELCOME_PAGE:-true}"
+  ENABLE_PREJOIN_PAGE="${ENABLE_PREJOIN_PAGE:-true}"
+  ENABLE_LOBBY="${ENABLE_LOBBY:-true}"
+  ENABLE_CLOSE_PAGE="${ENABLE_CLOSE_PAGE:-false}"
+  DISABLE_AUDIO_LEVELS="${DISABLE_AUDIO_LEVELS:-false}"
+  ENABLE_NOISY_MIC_DETECTION="${ENABLE_NOISY_MIC_DETECTION:-true}"
+  ENABLE_BREAKOUT_ROOMS="${ENABLE_BREAKOUT_ROOMS:-true}"
+  ENABLE_REGISTRATION="${ENABLE_REGISTRATION:-true}"
 
-	# Jibri recording/streaming configuration
-	# Auto-enable recording features when Jibri is enabled
-	ENABLE_JIBRI="${ENABLE_JIBRI:-0}"
-	if [ "$ENABLE_JIBRI" = "1" ]; then
-		ENABLE_RECORDING="${ENABLE_RECORDING:-true}"
-		ENABLE_LIVESTREAMING="${ENABLE_LIVESTREAMING:-true}"
-		ENABLE_FILE_RECORDING_SERVICE="${ENABLE_FILE_RECORDING_SERVICE:-true}"
-	else
-		ENABLE_RECORDING="${ENABLE_RECORDING:-false}"
-		ENABLE_LIVESTREAMING="${ENABLE_LIVESTREAMING:-false}"
-		ENABLE_FILE_RECORDING_SERVICE="${ENABLE_FILE_RECORDING_SERVICE:-false}"
-	fi
+  # Jibri recording/streaming configuration
+  ENABLE_JIBRI="${ENABLE_JIBRI:-0}"
+  if [[ "${ENABLE_JIBRI}" == "1" ]]; then
+    ENABLE_RECORDING="${ENABLE_RECORDING:-true}"
+    ENABLE_LIVESTREAMING="${ENABLE_LIVESTREAMING:-true}"
+    ENABLE_FILE_RECORDING_SERVICE="${ENABLE_FILE_RECORDING_SERVICE:-true}"
+  else
+    ENABLE_RECORDING="${ENABLE_RECORDING:-false}"
+    ENABLE_LIVESTREAMING="${ENABLE_LIVESTREAMING:-false}"
+    ENABLE_FILE_RECORDING_SERVICE="${ENABLE_FILE_RECORDING_SERVICE:-false}"
+  fi
 
-	# Video quality constraints
-	RESOLUTION="${RESOLUTION:-720}"
-	RESOLUTION_MIN="${RESOLUTION_MIN:-180}"
-	RESOLUTION_WIDTH="${RESOLUTION_WIDTH:-1280}"
-	RESOLUTION_WIDTH_MIN="${RESOLUTION_WIDTH_MIN:-320}"
+  # Video quality constraints
+  RESOLUTION="${RESOLUTION:-720}"
+  RESOLUTION_MIN="${RESOLUTION_MIN:-180}"
+  RESOLUTION_WIDTH="${RESOLUTION_WIDTH:-1280}"
+  RESOLUTION_WIDTH_MIN="${RESOLUTION_WIDTH_MIN:-320}"
 
-	# Watermark/branding overlay settings
-	SHOW_JITSI_WATERMARK="${SHOW_JITSI_WATERMARK:-false}"
-	JITSI_WATERMARK_LINK="${JITSI_WATERMARK_LINK:-}"
-	SHOW_BRAND_WATERMARK="${SHOW_BRAND_WATERMARK:-false}"
-	BRAND_WATERMARK_LINK="${BRAND_WATERMARK_LINK:-}"
+  # Watermark/branding overlay settings
+  SHOW_JITSI_WATERMARK="${SHOW_JITSI_WATERMARK:-false}"
+  JITSI_WATERMARK_LINK="${JITSI_WATERMARK_LINK:-}"
+  SHOW_BRAND_WATERMARK="${SHOW_BRAND_WATERMARK:-false}"
+  BRAND_WATERMARK_LINK="${BRAND_WATERMARK_LINK:-}"
 }
 
 # Load existing .env file and export variables to environment
-# Preserves previous configuration when re-running installer
 __load_existing_env() {
-	[ -f "$ENV_FILE" ] || return 0
-	while IFS='=' read -r key value; do
-		# Skip comments and empty lines
-		case "$key" in \#*|"") continue ;; esac
-		export "$key=$value" 2>/dev/null || true
-	done < "$ENV_FILE"
+  [[ -f "${ENV_FILE}" ]] || return 0
+  local key value
+  while IFS='=' read -r key value; do
+    case "${key}" in \#*|"") continue ;; esac
+    export "${key}=${value}" 2>/dev/null || true
+  done < "${ENV_FILE}"
 }
 
-# =============================================================================
-# Docker Installation
-# =============================================================================
-# Install Docker CE from official repositories for each distribution
-# Avoids distro-packaged docker.io which may be outdated
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Docker installation
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 
-# Detect the system's package manager
-# Returns: apt, dnf, yum, zypper, or pacman
 __detect_pkg_mgr() {
-	for pm in apt-get dnf yum zypper pacman; do
-		__need_cmd "$pm" && echo "${pm%-get}" && return
-	done
-	__die "No supported package manager found (apt/dnf/yum/zypper/pacman)."
+  local pm
+  for pm in apt-get dnf yum zypper pacman; do
+    if __need_cmd "${pm}"; then
+      printf '%s\n' "${pm%-get}"
+      return
+    fi
+  done
+  __die "No supported package manager found (apt/dnf/yum/zypper/pacman)."
 }
 
-# Install Docker CE from official Docker repositories
-# Handles apt (Debian/Ubuntu), dnf (Fedora), yum (CentOS/RHEL),
-# zypper (openSUSE), and pacman (Arch)
 __setup_docker_official() {
-	PM="$(__detect_pkg_mgr)"
-	__info "Installing Docker Engine using: $PM"
+  local PM
+  PM="$(__detect_pkg_mgr)"
+  __info "Installing Docker Engine using: ${PM}"
 
-	case "$PM" in
-	apt)
-		__need_cmd gpg || { apt-get update && apt-get install -y gpg; }
-		apt-get update
-		apt-get install -y ca-certificates gnupg curl
-		install -m 0755 -d /etc/apt/keyrings
-		if [ ! -s /etc/apt/keyrings/docker.gpg ]; then
-			. /etc/os-release
-			curl -fsSL "https://download.docker.com/linux/$ID/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-			chmod a+r /etc/apt/keyrings/docker.gpg
-		fi
-		. /etc/os-release
-		echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$ID $VERSION_CODENAME stable" \
-			>/etc/apt/sources.list.d/docker.list
-		apt-get update
-		apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-		;;
-	dnf)
-		dnf -y install dnf-plugins-core curl
-		. /etc/os-release
-		case "$ID" in
-			fedora) dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo ;;
-			*) dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo ;;
-		esac
-		dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-		;;
-	yum)
-		yum -y install yum-utils curl
-		yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-		yum -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-		;;
-	zypper)
-		zypper refresh
-		zypper -n install ca-certificates curl
-		. /etc/os-release
-		zypper -n addrepo "https://download.docker.com/linux/$ID/docker-ce.repo" docker-ce || true
-		zypper refresh
-		zypper -n install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ||
-			zypper -n install docker docker-compose
-		;;
-	pacman)
-		pacman -Sy --noconfirm --needed docker docker-compose
-		;;
-	esac
-	systemctl enable --now docker
+  case "${PM}" in
+  apt)
+    __need_cmd gpg || { apt-get update && apt-get install -y gpg; }
+    apt-get update
+    apt-get install -y ca-certificates gnupg curl
+    install -m 0755 -d /etc/apt/keyrings
+    if [[ ! -s /etc/apt/keyrings/docker.gpg ]]; then
+      . /etc/os-release
+      curl -fsSL "https://download.docker.com/linux/${ID}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      chmod a+r /etc/apt/keyrings/docker.gpg
+    fi
+    . /etc/os-release
+    printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/%s %s stable\n' \
+      "$(dpkg --print-architecture)" "${ID}" "${VERSION_CODENAME}" \
+      > /etc/apt/sources.list.d/docker.list
+    apt-get update
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    ;;
+  dnf)
+    dnf -y install dnf-plugins-core curl
+    . /etc/os-release
+    case "${ID}" in
+      fedora) dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo ;;
+      *)      dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo ;;
+    esac
+    dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    ;;
+  yum)
+    yum -y install yum-utils curl
+    yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+    yum -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    ;;
+  zypper)
+    zypper refresh
+    zypper -n install ca-certificates curl
+    . /etc/os-release
+    zypper -n addrepo "https://download.docker.com/linux/${ID}/docker-ce.repo" docker-ce || true
+    zypper refresh
+    zypper -n install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
+      || zypper -n install docker docker-compose
+    ;;
+  pacman)
+    pacman -Sy --noconfirm --needed docker docker-compose
+    ;;
+  esac
+  systemctl enable --now docker
 }
 
-# Check for Docker and Docker Compose, install if missing
-# Supports both new plugin (docker compose) and legacy (docker-compose)
 __ensure_docker() {
-	if ! __need_cmd docker; then
-		__setup_docker_official
-	else
-		__info "Docker already installed."
-		__need_cmd systemctl && systemctl start docker 2>/dev/null || true
-	fi
+  if ! __need_cmd docker; then
+    __setup_docker_official
+  else
+    __info "Docker already installed."
+    __need_cmd systemctl && systemctl start docker 2>/dev/null || true
+  fi
 
-	# Check for Docker Compose (plugin or standalone)
-	if docker compose version >/dev/null 2>&1; then
-		__info "Docker Compose plugin available."
-	elif __need_cmd docker-compose; then
-		__info "Legacy docker-compose available."
-	else
-		__warn "Docker Compose not found; installing..."
-		__setup_docker_official
-	fi
+  if docker compose version >/dev/null 2>&1; then
+    __info "Docker Compose plugin available."
+  elif __need_cmd docker-compose; then
+    __info "Legacy docker-compose available."
+  else
+    __warn "Docker Compose not found; installing..."
+    __setup_docker_official
+  fi
 }
 
-# Wrapper to call docker compose with the correct syntax
-# Uses plugin syntax if available, falls back to legacy
 __docker_compose() {
-	if docker compose version >/dev/null 2>&1; then
-		docker compose -f "$COMPOSE_FILE" "$@"
-	else
-		docker-compose -f "$COMPOSE_FILE" "$@"
-	fi
+  if docker compose version >/dev/null 2>&1; then
+    docker compose -f "${COMPOSE_FILE}" "$@"
+  else
+    docker-compose -f "${COMPOSE_FILE}" "$@"
+  fi
 }
 
-# =============================================================================
-# Environment & Compose Generation
-# =============================================================================
-# Generate .env and docker-compose.yml files for the Jitsi stack
-# Handles backups, idempotent updates, and secret generation
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Environment and compose generation
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 
-# Create timestamped backup of a file before modification
 __backup_file() {
-	[ -f "$1" ] || return 0
-	mkdir -p "$BACKUP_DIR"
-	cp -p "$1" "$BACKUP_DIR/${1##*/}.$(__timestamp)"
+  [[ -f "$1" ]] || return 0
+  mkdir -p "${BACKUP_DIR}"
+  cp -p "$1" "${BACKUP_DIR}/${1##*/}.$(__timestamp)"
 }
 
-# Create required directory structure for installation
 __init_dirs() {
-	mkdir -p "$JITSI_BASE_DIR" "$JITSI_CONFIG_DIR" "$JITSI_DATA_DIR" "$BACKUP_DIR"
+  mkdir -p "${JITSI_BASE_DIR}" "${JITSI_CONFIG_DIR}" "${JITSI_DATA_DIR}" "${BACKUP_DIR}"
 }
 
-# Add a key=value pair to .env if it doesn't already exist
-# Used for adding new config options without overwriting existing ones
 __ensure_env_key() {
-	grep -qE -- "^$1=" "$ENV_FILE" 2>/dev/null || printf '%s=%s\n' "$1" "$2" >>"$ENV_FILE"
+  grep -qE -- "^$1=" "${ENV_FILE}" 2>/dev/null || printf '%s=%s\n' "$1" "$2" >> "${ENV_FILE}"
 }
 
-# Generate the main .env configuration file
-# Only creates if not exists; preserves existing configuration
 __gen_env_file() {
-	[ -f "$ENV_FILE" ] && { __info "Found existing .env (preserving)."; return; }
+  [[ -f "${ENV_FILE}" ]] && { __info "Found existing .env (preserving)."; return; }
 
-	__info "Creating default .env"
-	cat >"$ENV_FILE" <<EOF
+  __info "Creating default .env"
+  cat > "${ENV_FILE}" <<EOF
 # Jitsi Meet Configuration
 # Re-run install.sh to safely update
 
 # Core
-JITSI_DATA_DIR=$JITSI_DATA_DIR
-JITSI_CONFIG_DIR=$JITSI_CONFIG_DIR
-HTTP_PORT=$HTTP_PORT
+JITSI_DATA_DIR=${JITSI_DATA_DIR}
+JITSI_CONFIG_DIR=${JITSI_CONFIG_DIR}
+HTTP_PORT=${HTTP_PORT}
 HTTPS_PORT=0
 ENABLE_HTTP_REDIRECT=0
 ENABLE_LETSENCRYPT=0
-PUBLIC_URL=$PUBLIC_URL
-PUBLIC_DOMAIN=$PUBLIC_DOMAIN
-TZ=$TZ
+PUBLIC_URL=${PUBLIC_URL}
+PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
+TZ=${TZ}
 
 # Authentication
-ENABLE_AUTH=$ENABLE_AUTH
+ENABLE_AUTH=${ENABLE_AUTH}
 ENABLE_GUESTS=1
-AUTH_TYPE=$AUTH_TYPE
+AUTH_TYPE=${AUTH_TYPE}
 
 # Component Credentials
 JICOFO_AUTH_USER=focus
-JICOFO_AUTH_PASSWORD=$JICOFO_AUTH_PASSWORD
+JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
 JVB_AUTH_USER=jvb
-JVB_AUTH_PASSWORD=$JVB_AUTH_PASSWORD
+JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
 
 # Videobridge
 JVB_UDP_PORT=10000
 JVB_TCP_HARVESTER_DISABLED=true
 
 # SMTP
-SMTP_SERVER=${SMTP_SERVER:-$SMTP_SERVER_DEFAULT}
-SMTP_PORT=${SMTP_PORT:-$SMTP_PORT_DEFAULT}
-SMTP_FROM=${SMTP_FROM:-no-reply@$PUBLIC_DOMAIN}
+SMTP_SERVER=${SMTP_SERVER:-${SMTP_SERVER_DEFAULT}}
+SMTP_PORT=${SMTP_PORT:-${SMTP_PORT_DEFAULT}}
+SMTP_FROM=${SMTP_FROM:-no-reply@${PUBLIC_DOMAIN}}
 SMTP_USERNAME=${SMTP_USERNAME:-}
 SMTP_PASSWORD=${SMTP_PASSWORD:-}
 SMTP_TLS=${SMTP_TLS:-0}
 SMTP_STARTTLS=${SMTP_STARTTLS:-0}
 
 # Docker Images
-JITSI_IMAGE_TAG=$JITSI_TAG
+JITSI_IMAGE_TAG=${JITSI_TAG}
 
 # Branding
-APP_NAME="$APP_NAME"
-PROVIDER_NAME="$PROVIDER_NAME"
-NATIVE_APP_NAME="$NATIVE_APP_NAME"
-DEFAULT_LANGUAGE=$DEFAULT_LANGUAGE
+APP_NAME="${APP_NAME}"
+PROVIDER_NAME="${PROVIDER_NAME}"
+NATIVE_APP_NAME="${NATIVE_APP_NAME}"
+DEFAULT_LANGUAGE=${DEFAULT_LANGUAGE}
 
 # Features
-ENABLE_WELCOME_PAGE=$ENABLE_WELCOME_PAGE
-ENABLE_PREJOIN_PAGE=$ENABLE_PREJOIN_PAGE
-ENABLE_LOBBY=$ENABLE_LOBBY
-ENABLE_CLOSE_PAGE=$ENABLE_CLOSE_PAGE
-DISABLE_AUDIO_LEVELS=$DISABLE_AUDIO_LEVELS
-ENABLE_NOISY_MIC_DETECTION=$ENABLE_NOISY_MIC_DETECTION
-ENABLE_BREAKOUT_ROOMS=$ENABLE_BREAKOUT_ROOMS
-ENABLE_REGISTRATION=$ENABLE_REGISTRATION
+ENABLE_WELCOME_PAGE=${ENABLE_WELCOME_PAGE}
+ENABLE_PREJOIN_PAGE=${ENABLE_PREJOIN_PAGE}
+ENABLE_LOBBY=${ENABLE_LOBBY}
+ENABLE_CLOSE_PAGE=${ENABLE_CLOSE_PAGE}
+DISABLE_AUDIO_LEVELS=${DISABLE_AUDIO_LEVELS}
+ENABLE_NOISY_MIC_DETECTION=${ENABLE_NOISY_MIC_DETECTION}
+ENABLE_BREAKOUT_ROOMS=${ENABLE_BREAKOUT_ROOMS}
+ENABLE_REGISTRATION=${ENABLE_REGISTRATION}
 
 # Jibri (Recording)
-ENABLE_JIBRI=$ENABLE_JIBRI
+ENABLE_JIBRI=${ENABLE_JIBRI}
 JIBRI_RECORDER_USER=recorder
 JIBRI_RECORDER_PASSWORD=
 JIBRI_XMPP_USER=jibri
 JIBRI_XMPP_PASSWORD=
 
 # Recording/Streaming
-ENABLE_RECORDING=$ENABLE_RECORDING
-ENABLE_LIVESTREAMING=$ENABLE_LIVESTREAMING
-ENABLE_FILE_RECORDING_SERVICE=$ENABLE_FILE_RECORDING_SERVICE
+ENABLE_RECORDING=${ENABLE_RECORDING}
+ENABLE_LIVESTREAMING=${ENABLE_LIVESTREAMING}
+ENABLE_FILE_RECORDING_SERVICE=${ENABLE_FILE_RECORDING_SERVICE}
 
 # Video Quality
-RESOLUTION=$RESOLUTION
-RESOLUTION_MIN=$RESOLUTION_MIN
-RESOLUTION_WIDTH=$RESOLUTION_WIDTH
-RESOLUTION_WIDTH_MIN=$RESOLUTION_WIDTH_MIN
+RESOLUTION=${RESOLUTION}
+RESOLUTION_MIN=${RESOLUTION_MIN}
+RESOLUTION_WIDTH=${RESOLUTION_WIDTH}
+RESOLUTION_WIDTH_MIN=${RESOLUTION_WIDTH_MIN}
 
 # Watermark
-SHOW_JITSI_WATERMARK=$SHOW_JITSI_WATERMARK
-JITSI_WATERMARK_LINK=$JITSI_WATERMARK_LINK
-SHOW_BRAND_WATERMARK=$SHOW_BRAND_WATERMARK
-BRAND_WATERMARK_LINK=$BRAND_WATERMARK_LINK
+SHOW_JITSI_WATERMARK=${SHOW_JITSI_WATERMARK}
+JITSI_WATERMARK_LINK=${JITSI_WATERMARK_LINK}
+SHOW_BRAND_WATERMARK=${SHOW_BRAND_WATERMARK}
+BRAND_WATERMARK_LINK=${BRAND_WATERMARK_LINK}
 EOF
 }
 
-# Ensure all configuration keys exist in .env
-# Adds any new keys introduced in updates without overwriting existing values
 __ensure_all_env_keys() {
-	__ensure_env_key JITSI_DATA_DIR "$JITSI_DATA_DIR"
-	__ensure_env_key JITSI_CONFIG_DIR "$JITSI_CONFIG_DIR"
-	__ensure_env_key SMTP_SERVER "$SMTP_SERVER_DEFAULT"
-	__ensure_env_key SMTP_PORT "$SMTP_PORT_DEFAULT"
-	__ensure_env_key SMTP_FROM "no-reply@$PUBLIC_DOMAIN"
-	__ensure_env_key SMTP_USERNAME ""
-	__ensure_env_key SMTP_PASSWORD ""
-	__ensure_env_key SMTP_TLS "0"
-	__ensure_env_key SMTP_STARTTLS "0"
-	__ensure_env_key JITSI_IMAGE_TAG "$JITSI_TAG"
-	__ensure_env_key AUTH_TYPE "$AUTH_TYPE"
-	__ensure_env_key ENABLE_GUESTS "1"
-	__ensure_env_key JICOFO_AUTH_USER "focus"
-	__ensure_env_key JVB_AUTH_USER "jvb"
-	__ensure_env_key JVB_UDP_PORT "10000"
-	__ensure_env_key JVB_TCP_HARVESTER_DISABLED "true"
-	__ensure_env_key APP_NAME "$APP_NAME"
-	__ensure_env_key NATIVE_APP_NAME "$NATIVE_APP_NAME"
-	__ensure_env_key PROVIDER_NAME "$PROVIDER_NAME"
-	__ensure_env_key DEFAULT_LANGUAGE "$DEFAULT_LANGUAGE"
-	__ensure_env_key ENABLE_WELCOME_PAGE "$ENABLE_WELCOME_PAGE"
-	__ensure_env_key ENABLE_PREJOIN_PAGE "$ENABLE_PREJOIN_PAGE"
-	__ensure_env_key ENABLE_LOBBY "$ENABLE_LOBBY"
-	__ensure_env_key ENABLE_CLOSE_PAGE "$ENABLE_CLOSE_PAGE"
-	__ensure_env_key DISABLE_AUDIO_LEVELS "$DISABLE_AUDIO_LEVELS"
-	__ensure_env_key ENABLE_NOISY_MIC_DETECTION "$ENABLE_NOISY_MIC_DETECTION"
-	__ensure_env_key ENABLE_BREAKOUT_ROOMS "$ENABLE_BREAKOUT_ROOMS"
-	__ensure_env_key ENABLE_REGISTRATION "$ENABLE_REGISTRATION"
-	__ensure_env_key ENABLE_JIBRI "$ENABLE_JIBRI"
-	__ensure_env_key JIBRI_RECORDER_USER "recorder"
-	__ensure_env_key JIBRI_XMPP_USER "jibri"
-	__ensure_env_key ENABLE_RECORDING "$ENABLE_RECORDING"
-	__ensure_env_key ENABLE_LIVESTREAMING "$ENABLE_LIVESTREAMING"
-	__ensure_env_key ENABLE_FILE_RECORDING_SERVICE "$ENABLE_FILE_RECORDING_SERVICE"
-	__ensure_env_key RESOLUTION "$RESOLUTION"
-	__ensure_env_key RESOLUTION_MIN "$RESOLUTION_MIN"
-	__ensure_env_key RESOLUTION_WIDTH "$RESOLUTION_WIDTH"
-	__ensure_env_key RESOLUTION_WIDTH_MIN "$RESOLUTION_WIDTH_MIN"
-	__ensure_env_key SHOW_JITSI_WATERMARK "$SHOW_JITSI_WATERMARK"
-	__ensure_env_key JITSI_WATERMARK_LINK "$JITSI_WATERMARK_LINK"
-	__ensure_env_key SHOW_BRAND_WATERMARK "$SHOW_BRAND_WATERMARK"
-	__ensure_env_key BRAND_WATERMARK_LINK "$BRAND_WATERMARK_LINK"
+  __ensure_env_key JITSI_DATA_DIR "${JITSI_DATA_DIR}"
+  __ensure_env_key JITSI_CONFIG_DIR "${JITSI_CONFIG_DIR}"
+  __ensure_env_key SMTP_SERVER "${SMTP_SERVER_DEFAULT}"
+  __ensure_env_key SMTP_PORT "${SMTP_PORT_DEFAULT}"
+  __ensure_env_key SMTP_FROM "no-reply@${PUBLIC_DOMAIN}"
+  __ensure_env_key SMTP_USERNAME ""
+  __ensure_env_key SMTP_PASSWORD ""
+  __ensure_env_key SMTP_TLS "0"
+  __ensure_env_key SMTP_STARTTLS "0"
+  __ensure_env_key JITSI_IMAGE_TAG "${JITSI_TAG}"
+  __ensure_env_key AUTH_TYPE "${AUTH_TYPE}"
+  __ensure_env_key ENABLE_GUESTS "1"
+  __ensure_env_key JICOFO_AUTH_USER "focus"
+  __ensure_env_key JVB_AUTH_USER "jvb"
+  __ensure_env_key JVB_UDP_PORT "10000"
+  __ensure_env_key JVB_TCP_HARVESTER_DISABLED "true"
+  __ensure_env_key APP_NAME "${APP_NAME}"
+  __ensure_env_key NATIVE_APP_NAME "${NATIVE_APP_NAME}"
+  __ensure_env_key PROVIDER_NAME "${PROVIDER_NAME}"
+  __ensure_env_key DEFAULT_LANGUAGE "${DEFAULT_LANGUAGE}"
+  __ensure_env_key ENABLE_WELCOME_PAGE "${ENABLE_WELCOME_PAGE}"
+  __ensure_env_key ENABLE_PREJOIN_PAGE "${ENABLE_PREJOIN_PAGE}"
+  __ensure_env_key ENABLE_LOBBY "${ENABLE_LOBBY}"
+  __ensure_env_key ENABLE_CLOSE_PAGE "${ENABLE_CLOSE_PAGE}"
+  __ensure_env_key DISABLE_AUDIO_LEVELS "${DISABLE_AUDIO_LEVELS}"
+  __ensure_env_key ENABLE_NOISY_MIC_DETECTION "${ENABLE_NOISY_MIC_DETECTION}"
+  __ensure_env_key ENABLE_BREAKOUT_ROOMS "${ENABLE_BREAKOUT_ROOMS}"
+  __ensure_env_key ENABLE_REGISTRATION "${ENABLE_REGISTRATION}"
+  __ensure_env_key ENABLE_JIBRI "${ENABLE_JIBRI}"
+  __ensure_env_key JIBRI_RECORDER_USER "recorder"
+  __ensure_env_key JIBRI_XMPP_USER "jibri"
+  __ensure_env_key ENABLE_RECORDING "${ENABLE_RECORDING}"
+  __ensure_env_key ENABLE_LIVESTREAMING "${ENABLE_LIVESTREAMING}"
+  __ensure_env_key ENABLE_FILE_RECORDING_SERVICE "${ENABLE_FILE_RECORDING_SERVICE}"
+  __ensure_env_key RESOLUTION "${RESOLUTION}"
+  __ensure_env_key RESOLUTION_MIN "${RESOLUTION_MIN}"
+  __ensure_env_key RESOLUTION_WIDTH "${RESOLUTION_WIDTH}"
+  __ensure_env_key RESOLUTION_WIDTH_MIN "${RESOLUTION_WIDTH_MIN}"
+  __ensure_env_key SHOW_JITSI_WATERMARK "${SHOW_JITSI_WATERMARK}"
+  __ensure_env_key JITSI_WATERMARK_LINK "${JITSI_WATERMARK_LINK}"
+  __ensure_env_key SHOW_BRAND_WATERMARK "${SHOW_BRAND_WATERMARK}"
+  __ensure_env_key BRAND_WATERMARK_LINK "${BRAND_WATERMARK_LINK}"
 }
 
-# Generate missing passwords and secrets
-# Preserves existing secrets from .env or credentials file
-# Generates new random passwords for any empty fields
 __fill_missing_secrets() {
-	. "$ENV_FILE"
-	changed=0
+  # shellcheck source=/dev/null
+  . "${ENV_FILE}"
+  local changed=0
 
-	# __sed_inplace: portable in-place sed (BSD sed requires a backup extension)
-	__sed_inplace() { sed -i.bak "$1" "$2" && rm -f "$2.bak"; }
+  # __sed_inplace: portable in-place sed (BSD sed requires a backup extension)
+  __sed_inplace() { sed -i.bak "$1" "$2" && rm -f "$2.bak"; }
 
-	# Generate component authentication passwords if missing
-	if [ -z "${JICOFO_AUTH_PASSWORD:-}" ]; then
-		__sed_inplace "s/^JICOFO_AUTH_PASSWORD=.*/JICOFO_AUTH_PASSWORD=$(__randpass)/" "$ENV_FILE"
-		changed=1
-	fi
-	if [ -z "${JVB_AUTH_PASSWORD:-}" ]; then
-		__sed_inplace "s/^JVB_AUTH_PASSWORD=.*/JVB_AUTH_PASSWORD=$(__randpass)/" "$ENV_FILE"
-		changed=1
-	fi
+  if [[ -z "${JICOFO_AUTH_PASSWORD:-}" ]]; then
+    __sed_inplace "s/^JICOFO_AUTH_PASSWORD=.*/JICOFO_AUTH_PASSWORD=$(__randpass)/" "${ENV_FILE}"
+    changed=1
+  fi
+  if [[ -z "${JVB_AUTH_PASSWORD:-}" ]]; then
+    __sed_inplace "s/^JVB_AUTH_PASSWORD=.*/JVB_AUTH_PASSWORD=$(__randpass)/" "${ENV_FILE}"
+    changed=1
+  fi
 
-	# Generate Jibri passwords if Jibri is enabled
-	if [ "${ENABLE_JIBRI:-0}" = "1" ]; then
-		[ -z "${JIBRI_RECORDER_PASSWORD:-}" ] && __sed_inplace "s/^JIBRI_RECORDER_PASSWORD=.*/JIBRI_RECORDER_PASSWORD=$(__randpass)/" "$ENV_FILE" && changed=1
-		[ -z "${JIBRI_XMPP_PASSWORD:-}" ] && __sed_inplace "s/^JIBRI_XMPP_PASSWORD=.*/JIBRI_XMPP_PASSWORD=$(__randpass)/" "$ENV_FILE" && changed=1
-	fi
+  if [[ "${ENABLE_JIBRI:-0}" == "1" ]]; then
+    [[ -z "${JIBRI_RECORDER_PASSWORD:-}" ]] && __sed_inplace "s/^JIBRI_RECORDER_PASSWORD=.*/JIBRI_RECORDER_PASSWORD=$(__randpass)/" "${ENV_FILE}" && changed=1
+    [[ -z "${JIBRI_XMPP_PASSWORD:-}" ]] && __sed_inplace "s/^JIBRI_XMPP_PASSWORD=.*/JIBRI_XMPP_PASSWORD=$(__randpass)/" "${ENV_FILE}" && changed=1
+  fi
 
-	# Get admin password from credentials file or generate new one
-	if [ -z "${ADMIN_PASS:-}" ]; then
-		if [ -f "$CREDS_FILE" ] && grep -q -- "^ADMIN_USER=$ADMIN_USER$" "$CREDS_FILE"; then
-			ADMIN_PASS="$(grep -m1 -- '^ADMIN_PASS=' "$CREDS_FILE" | sed 's/^ADMIN_PASS=//')"
-		else
-			ADMIN_PASS="$(__randpass)"
-		fi
-	fi
+  if [[ -z "${ADMIN_PASS:-}" ]]; then
+    if [[ -f "${CREDS_FILE}" ]] && grep -q -- "^ADMIN_USER=${ADMIN_USER}$" "${CREDS_FILE}"; then
+      ADMIN_PASS="$(grep -m1 -- '^ADMIN_PASS=' "${CREDS_FILE}" | sed 's/^ADMIN_PASS=//')"
+    else
+      ADMIN_PASS="$(__randpass)"
+    fi
+  fi
 
-	[ "$changed" -ne 1 ] || __info "Generated missing credentials."
+  [[ "${changed}" -ne 1 ]] || __info "Generated missing credentials."
 }
 
-# Generate docker-compose.yml with all services
-# Creates backups before overwriting existing file
 __write_compose() {
-	__backup_file "$COMPOSE_FILE"
-	__info "Writing docker-compose.yml"
+  __backup_file "${COMPOSE_FILE}"
+  __info "Writing docker-compose.yml"
 
-	cat >"$COMPOSE_FILE" <<'YAML'
+  cat > "${COMPOSE_FILE}" <<'YAML'
 services:
   prosody:
     container_name: jitsi-prosody
@@ -613,10 +624,9 @@ services:
     networks: [meet]
 YAML
 
-	# Add Jibri if enabled
-	if [ "${ENABLE_JIBRI:-0}" = "1" ]; then
-		__info "Adding Jibri to compose..."
-		cat >>"$COMPOSE_FILE" <<'JIBRI_YAML'
+  if [[ "${ENABLE_JIBRI:-0}" == "1" ]]; then
+    __info "Adding Jibri to compose..."
+    cat >> "${COMPOSE_FILE}" <<'JIBRI_YAML'
 
   jibri:
     container_name: jitsi-jibri
@@ -653,9 +663,9 @@ YAML
     shm_size: '2gb'
     networks: [meet]
 JIBRI_YAML
-	fi
+  fi
 
-	cat >>"$COMPOSE_FILE" <<'NET_YAML'
+  cat >> "${COMPOSE_FILE}" <<'NET_YAML'
 
 networks:
   meet:
@@ -663,83 +673,69 @@ networks:
 NET_YAML
 }
 
-# =============================================================================
-# Stack Management
-# =============================================================================
-# Functions for managing the Docker container stack lifecycle
-# Includes prerequisite checks, startup, and health monitoring
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Stack management
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 
-# Check and setup Jibri prerequisites (ALSA loopback module)
-# Jibri requires snd-aloop kernel module for audio capture
 __check_jibri_prereqs() {
-	[ "${ENABLE_JIBRI:-0}" = "1" ] || return 0
+  [[ "${ENABLE_JIBRI:-0}" == "1" ]] || return 0
 
-	__info "Checking Jibri prerequisites..."
-	# Load ALSA loopback module if not already loaded
-	if ! lsmod | grep -q -- snd_aloop; then
-		__warn "ALSA loopback module (snd-aloop) not loaded."
-		modprobe snd-aloop 2>/dev/null || __warn "Could not load snd-aloop."
-		# Make it persistent across reboots
-		[ -d /etc/modules-load.d ] && echo "snd-aloop" >/etc/modules-load.d/jibri.conf
-	fi
-	# Create recordings directory with open permissions for Jibri
-	mkdir -p "${JITSI_DATA_DIR}/recordings"
-	chmod 777 "${JITSI_DATA_DIR}/recordings"
+  __info "Checking Jibri prerequisites..."
+  if ! lsmod | grep -q -- snd_aloop; then
+    __warn "ALSA loopback module (snd-aloop) not loaded."
+    modprobe snd-aloop 2>/dev/null || __warn "Could not load snd-aloop."
+    [[ -d /etc/modules-load.d ]] && printf 'snd-aloop\n' > /etc/modules-load.d/jibri.conf
+  fi
+  mkdir -p "${JITSI_DATA_DIR}/recordings"
+  chmod 777 "${JITSI_DATA_DIR}/recordings"
 }
 
-# Pull latest images and start all containers
 __start_stack() {
-	__info "Pulling images..."
-	__docker_compose pull
-	__info "Starting stack..."
-	__docker_compose up -d
+  __info "Pulling images..."
+  __docker_compose pull
+  __info "Starting stack..."
+  __docker_compose up -d
 }
 
-# Wait for Prosody XMPP server to be ready
-# Polls for up to 60 seconds before giving up
 __wait_for_prosody() {
-	__info "Waiting for Prosody..."
-	i=0
-	while [ "$i" -lt 30 ]; do
-		# Check if prosodyctl reports running status
-		docker exec jitsi-prosody prosodyctl status >/dev/null 2>&1 && return
-		# Also check logs for ready indicators
-		docker logs jitsi-prosody 2>&1 | grep -qE -- "(Prosody is ready|Started|Activated)" && return
-		i=$((i + 1))
-		sleep 2
-	done
-	__warn "Prosody readiness not confirmed; continuing."
+  __info "Waiting for Prosody..."
+  local i=0
+  while [[ "${i}" -lt 30 ]]; do
+    docker exec jitsi-prosody prosodyctl status >/dev/null 2>&1 && return
+    docker logs jitsi-prosody 2>&1 | grep -qE -- "(Prosody is ready|Started|Activated)" && return
+    i=$(( i + 1 ))
+    sleep 2
+  done
+  __warn "Prosody readiness not confirmed; continuing."
 }
 
-# Register or update the admin user in Prosody
-# Uses auth.meet.jitsi domain (internal_hashed storage, where passwords are kept)
 __register_admin_user() {
-	. "$ENV_FILE"
-	# Admin accounts must be registered on auth.meet.jitsi, not meet.jitsi.
-	# meet.jitsi uses jitsi-anonymous authentication and has no password storage.
-	# auth.meet.jitsi uses internal_hashed and is the correct credentials domain.
-	domain="auth.meet.jitsi"
+  # shellcheck source=/dev/null
+  . "${ENV_FILE}"
+  # Admin accounts must be registered on auth.meet.jitsi, not meet.jitsi.
+  # meet.jitsi uses jitsi-anonymous authentication and has no password storage.
+  # auth.meet.jitsi uses internal_hashed and is the correct credentials domain.
+  local domain="auth.meet.jitsi"
 
-	__info "Registering admin user '${ADMIN_USER}'..."
-	# Try passwd first (for existing users), then register (for new users)
-	docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua passwd "$ADMIN_USER" "$domain" "$ADMIN_PASS" >/dev/null 2>&1 ||
-		docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua register "$ADMIN_USER" "$domain" "$ADMIN_PASS" >/dev/null 2>&1 ||
-		__warn "Could not register admin user."
+  __info "Registering admin user '${ADMIN_USER}'..."
+  # Try passwd first (for existing users), then register (for new users)
+  docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua passwd "${ADMIN_USER}" "${domain}" "${ADMIN_PASS}" >/dev/null 2>&1 \
+    || docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua register "${ADMIN_USER}" "${domain}" "${ADMIN_PASS}" >/dev/null 2>&1 \
+    || __warn "Could not register admin user."
 
-	# Save credentials with restricted permissions
-	umask 077
-	cat >"$CREDS_FILE" <<EOF
-ADMIN_USER=$ADMIN_USER
-ADMIN_PASS=$ADMIN_PASS
+  umask 077
+  cat > "${CREDS_FILE}" <<EOF
+ADMIN_USER=${ADMIN_USER}
+ADMIN_PASS=${ADMIN_PASS}
 UPDATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 EOF
-	__info "Credentials saved: $CREDS_FILE"
+  __info "Credentials saved: ${CREDS_FILE}"
 }
 
-# Display installation summary with important details
 __post_summary() {
-	. "$ENV_FILE"
-	cat <<EOF
+  # shellcheck source=/dev/null
+  . "${ENV_FILE}"
+  cat <<EOF
 
 ============================================================
 Jitsi Meet Installation Complete
@@ -752,80 +748,22 @@ Credentials:     ${CREDS_FILE}
 Jibri:           ${ENABLE_JIBRI:-0}
 ------------------------------------------------------------
 Reverse proxy should forward to: http://127.0.0.1:${HTTP_PORT}
+Operational scripts installed to: /usr/local/bin
+  jitsi-user   — manage user accounts
+  jitsi-stack  — start/stop/restart/status/logs/update/backup
 ------------------------------------------------------------
 EOF
 }
 
-# =============================================================================
-# User Management
-# =============================================================================
-# CLI interface for managing Jitsi user accounts
-# Users are stored in Prosody on the meet.jitsi domain
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Help, version, and removal
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 
-# Handle user management commands (add, del, pass, list)
-# Interacts directly with Prosody via prosodyctl
-__user_management() {
-	action="${1:-}"
-	username="${2:-}"
-	password="${3:-}"
-
-	[ -f "$COMPOSE_FILE" ] || __die "Jitsi not installed. Run installer first."
-	# Strip domain part if provided
-	username=$(printf '%s' "$username" | sed 's/@.*//')
-
-	case "$action" in
-	add)
-		# Add new user with optional password (prompts if not provided)
-		[ -z "$username" ] && __die "Usage: $0 --user add <username> [password]"
-		if [ -z "$password" ]; then
-			printf "Password for %s: " "$username"
-			stty -echo; read -r password; stty echo; printf "\n"
-		fi
-		[ -z "$password" ] && __die "Password cannot be empty"
-		docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua register "$username" auth.meet.jitsi "$password" 2>/dev/null &&
-			__info "User '$username' created" || __die "Failed to create user"
-		;;
-	del|delete|rm)
-		# Delete existing user by removing the account data file directly.
-		# prosodyctl deluser requires mod_admin_shell which is not enabled in the
-		# casjaysdevdocker/prosody image; the flat-file backend stores each account
-		# as auth%2emeet%2ejitsi/accounts/<username>.dat so removal is equivalent.
-		[ -z "$username" ] && __die "Usage: $0 --user del <username>"
-		docker exec jitsi-prosody rm -f "/config/data/auth%2emeet%2ejitsi/accounts/$username.dat" 2>/dev/null &&
-			__info "User '$username' deleted" || __die "Failed to delete user"
-		;;
-	pass|passwd|password)
-		# Change user password (always prompts for security)
-		[ -z "$username" ] && __die "Usage: $0 --user pass <username>"
-		printf "New password for %s: " "$username"
-		stty -echo; read -r password; stty echo; printf "\n"
-		[ -z "$password" ] && __die "Password cannot be empty"
-		docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua passwd "$username" auth.meet.jitsi "$password" 2>/dev/null &&
-			__info "Password updated for '$username'" || __die "Failed to update password"
-		;;
-	list|ls)
-		# List all registered users
-		__info "Registered users:"
-		docker exec jitsi-prosody ls /config/data/auth%2emeet%2ejitsi/accounts/ 2>/dev/null | sed 's/\.dat$//' || echo "No users"
-		;;
-	*)
-		__die "Unknown action. Use: add, del, pass, list"
-		;;
-	esac
-	exit 0
-}
-
-# =============================================================================
-# Help & Actions
-# =============================================================================
-# Command-line interface handling for help, version, and removal
-
-# Display usage information and available options
 __show_help() {
-	cat <<EOF
+  cat <<EOF
 Jitsi Meet Installer v${VERSION}
 
-Usage: $0 [OPTIONS]
+Usage: ${APPNAME} [OPTIONS]
 
 Options:
   -h, --help        Show help
@@ -833,12 +771,6 @@ Options:
   -r, --remove      Remove installation
   --debug           Enable trace output (set -x)
   --no-color        Disable color output (also honoured via NO_COLOR env var)
-
-User Management:
-  --user add <name> [pass]   Add user
-  --user del <name>          Delete user
-  --user pass <name>         Change password
-  --user list                List users
 
 Environment Variables:
   PUBLIC_URL          Public URL (default: http://hostname)
@@ -848,102 +780,81 @@ Environment Variables:
   HTTP_PORT           HTTP port (default: 64453)
   APP_NAME            Application name
   ENABLE_JIBRI        Enable recording (default: 0)
+  GITHUB_RAW_REPO     GitHub repo for scripts (default: scriptmgr/jitsi)
 
 Examples:
-  sudo sh $0
-  PUBLIC_URL=https://meet.example.com sudo -E sh $0
-  sudo sh $0 --user add myuser
-  sudo sh $0 --remove
+  sudo bash ${APPNAME}
+  PUBLIC_URL=https://meet.example.com sudo -E bash ${APPNAME}
+  sudo bash ${APPNAME} --remove
 EOF
-	exit 0
+  exit 0
 }
 
-# Display version number
 __show_version() {
-	echo "Jitsi Meet Installer v${VERSION}"
-	exit 0
+  printf 'Jitsi Meet Installer v%s\n' "${VERSION}"
+  exit 0
 }
 
-# Complete removal of Jitsi installation
-# Stops containers, removes images/volumes, and deletes all files
 __do_remove() {
-	__require_root "$@"
-	[ -d "$JITSI_BASE_DIR" ] || __die "Not installed: $JITSI_BASE_DIR"
+  __require_root "$@"
+  [[ -d "${JITSI_BASE_DIR}" ]] || __die "Not installed: ${JITSI_BASE_DIR}"
 
-	__info "Removing Jitsi..."
-	# Stop and remove all containers, images, and volumes
-	[ -f "$COMPOSE_FILE" ] && __docker_compose down --rmi all --volumes 2>/dev/null || true
-	rm -rf "$JITSI_BASE_DIR"
-	__info "Jitsi removed."
-	exit 0
+  __info "Removing Jitsi..."
+  [[ -f "${COMPOSE_FILE}" ]] && __docker_compose down --rmi all --volumes 2>/dev/null || true
+  rm -rf "${JITSI_BASE_DIR}"
+  __info "Jitsi removed."
+  exit 0
 }
 
-# =============================================================================
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Main
-# =============================================================================
-# Entry point and orchestration for the installation process
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 
-# Main installation workflow
-# Executes all steps in order to install/update Jitsi
 __main() {
-	__require_root "$@"
-	__ensure_docker
-	__check_jibri_prereqs
-	__init_dirs
-	__gen_env_file
-	__ensure_all_env_keys
-	__fill_missing_secrets
-	__write_compose
-	__start_stack
-	__wait_for_prosody
-	__register_admin_user
-	__post_summary
+  __require_root "$@"
+  __ensure_docker
+  __check_jibri_prereqs
+  __init_dirs
+  __gen_env_file
+  __ensure_all_env_keys
+  __fill_missing_secrets
+  __write_compose
+  __start_stack
+  __wait_for_prosody
+  __register_admin_user
+  __need_cmd jq && __download_all_scripts_from_github /usr/local/bin \
+    || __warn "jq not found — skipping operational script install. Install jq and re-run to get jitsi-user and jitsi-stack."
+  __post_summary
 }
 
-# =============================================================================
-# Script Entry Point
-# =============================================================================
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Script entry point
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 
-# Initialize all configuration variables with defaults
 __init_config
 
-# Parse command-line arguments
-# getopts handles short options; the '-:' trick extends it to long options by
-# treating '-' as an option character and reading the long name from $OPTARG.
 INSTALL_REMOVE_MODE=0
-while getopts ":hvr-:" opt; do
-	case "$opt" in
-	h) __show_help ;;
-	v) __show_version ;;
-	r) INSTALL_REMOVE_MODE=1 ;;
-	-)
-		case "$OPTARG" in
-		help)             __show_help ;;
-		version)          __show_version ;;
-		remove)           INSTALL_REMOVE_MODE=1 ;;
-		debug)            DEBUG=1 ;;
-		no-color|no-colour) NO_COLOR=1 ;;
-		user)
-			# Shift past all getopts-consumed args, then hand off to subcommand
-			shift $((OPTIND - 1))
-			__user_management "$@"
-			;;
-		*)  __die "Unknown option: --$OPTARG" ;;
-		esac
-		;;
-	:)  __die "Option requires an argument: -$OPTARG" ;;
-	?)  __die "Unknown option: -$OPTARG" ;;
-	esac
+
+_OPTS="$(getopt -o hvr -l help,version,remove,debug,no-color -n "${APPNAME}" -- "$@")" \
+  || { __show_help; exit 1; }
+eval set -- "${_OPTS}"
+while true; do
+  case "$1" in
+    -h|--help)    __show_help ;;
+    -v|--version) __show_version ;;
+    -r|--remove)  INSTALL_REMOVE_MODE=1; shift ;;
+    --debug)      INSTALL_DEBUG=1; shift ;;
+    --no-color)   NO_COLOR=1; shift ;;
+    --)           shift; break ;;
+    *)            break ;;
+  esac
 done
-shift $((OPTIND - 1))
 
-[ "$DEBUG" = "1" ] && set -x
+[[ "${INSTALL_DEBUG}" == "1" ]] && set -x
 
-# Load existing configuration to preserve user settings
-[ "$INSTALL_REMOVE_MODE" = "0" ] && __load_existing_env
+[[ "${INSTALL_REMOVE_MODE}" == "0" ]] && __load_existing_env
+[[ "${INSTALL_REMOVE_MODE}" == "1" ]] && __do_remove "$@"
 
-# Handle removal if requested
-[ "$INSTALL_REMOVE_MODE" = "1" ] && __do_remove "$@"
-
-# Execute main installation
 __main "$@"
+
+# ex: ts=2 sw=2 et filetype=sh
