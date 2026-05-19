@@ -162,7 +162,11 @@ TLS is not handled inside the container stack. Instead, run a reverse proxy (e.g
 http://127.0.0.1:64453
 ```
 
-**Important:** WebSocket support is required for Jitsi to function properly.
+Three requirements for the proxy to work correctly:
+
+1. **WebSocket support** — Jitsi uses WebSocket for signalling. The proxy must forward `Upgrade: websocket` requests.
+2. **`X-Forwarded-Proto: https`** — Jitsi derives all BOSH/WebSocket URLs from `PUBLIC_URL`. If the proxy serves HTTPS but this header is missing or wrong, Jitsi generates `http://` resource URLs and browsers block them as mixed content.
+3. **Raised timeouts** — Jitsi WebSocket connections are long-lived (hours). Default Nginx timeouts of 60 s will silently drop active calls. Set `proxy_read_timeout` and `proxy_send_timeout` to at least 3600 s.
 
 ### Nginx
 
@@ -183,17 +187,38 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 }
 ```
 
 ### Caddy
 
+Caddy sets `X-Forwarded-Proto` and handles WebSocket upgrades automatically.
+
 ```caddyfile
 meet.example.com {
     reverse_proxy 127.0.0.1:64453
 }
 ```
+
+### Firewall: JVB media port
+
+The reverse proxy only handles HTTP/WebSocket (signalling). **Media traffic (audio/video) flows directly from each participant's browser to the Jitsi Video Bridge over UDP port 10000** — it never goes through the proxy.
+
+You must open this port on your firewall:
+
+```sh
+# firewalld (RHEL/AlmaLinux/Fedora)
+firewall-cmd --permanent --add-port=10000/udp
+firewall-cmd --reload
+
+# ufw (Debian/Ubuntu)
+ufw allow 10000/udp
+```
+
+If UDP port 10000 is blocked, the call will appear to connect (signalling works over HTTPS) but participants will have no audio or video.
 
 
 ## Updating

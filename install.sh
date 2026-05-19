@@ -1,6 +1,7 @@
 #!/bin/sh
 # shellcheck shell=sh
 # shellcheck disable=SC1090
+##@Version 202605190728-git
 # =============================================================================
 # Jitsi Meet Docker Installer
 # =============================================================================
@@ -17,7 +18,9 @@
 # -u: Treat unset variables as errors
 set -eu
 
-VERSION="1.0.0"
+VERSION="202605190728-git"
+DEBUG="${DEBUG:-0}"
+NO_COLOR="${NO_COLOR:-}"
 
 # =============================================================================
 # Utility Functions
@@ -26,24 +29,24 @@ VERSION="1.0.0"
 # output formatting, command detection, and password generation
 
 # Check if a command exists in PATH
-need_cmd() { command -v "$1" >/dev/null 2>&1; }
+__need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 # Print error message and exit with failure status
-die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+__die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 # Print informational message to stdout
-info() { printf 'INFO: %s\n' "$*"; }
+__info() { printf 'INFO: %s\n' "$*"; }
 
 # Print warning message to stderr
-warn() { printf 'WARN: %s\n' "$*" >&2; }
+__warn() { printf 'WARN: %s\n' "$*" >&2; }
 
-# Generate timestamp for backup file naming
-timestamp() { date +%Y%m%d-%H%M%S; }
+# Generate a timestamp for backup file naming
+__timestamp() { date +%Y%m%d-%H%M%S; }
 
 # Generate a random 24-character alphanumeric password
 # Uses openssl if available, falls back to /dev/urandom
-randpass() {
-	if need_cmd openssl; then
+__randpass() {
+	if __need_cmd openssl; then
 		openssl rand -base64 36 | tr -dc 'A-Za-z0-9' | head -c 24
 	else
 		dd if=/dev/urandom bs=1 count=48 2>/dev/null | od -An -tx1 | tr -dc 'A-Za-z0-9' | head -c 24
@@ -52,12 +55,12 @@ randpass() {
 
 # Ensure script is running as root, re-exec with sudo if needed
 # Preserves environment variables with -E flag
-require_root() {
+__require_root() {
 	if [ "$(id -u)" -ne 0 ]; then
-		if need_cmd sudo; then
+		if __need_cmd sudo; then
 			exec sudo -E -- "$0" "$@"
 		else
-			die "Must be run as root or with sudo."
+			__die "Must be run as root or with sudo."
 		fi
 	fi
 }
@@ -70,7 +73,7 @@ require_root() {
 
 # Initialize all configuration variables with defaults
 # Sets up directory paths, URLs, authentication, branding, and feature flags
-init_config() {
+__init_config() {
 	# Directory structure for installation
 	JITSI_BASE_DIR="${JITSI_BASE_DIR:-/opt/jitsi}"
 	ENV_FILE="$JITSI_BASE_DIR/.env"
@@ -82,12 +85,24 @@ init_config() {
 
 	# Extract public URL and domain from environment or hostname
 	PUBLIC_URL="${PUBLIC_URL:-http://$(hostname -f 2>/dev/null || hostname)}"
+	# Strip trailing slash — a common paste error that breaks BOSH/WebSocket URLs
+	PUBLIC_URL=$(printf '%s' "$PUBLIC_URL" | sed 's|/$||')
+	# Validate scheme — must be http:// or https://
+	case "$PUBLIC_URL" in
+		http://*|https://*) ;;
+		*) __die "PUBLIC_URL must start with http:// or https:// (got: $PUBLIC_URL)" ;;
+	esac
+	# Warn when scheme is http: the reverse proxy must serve HTTPS and send
+	# X-Forwarded-Proto: https, otherwise Jitsi generates mixed-content URLs.
+	case "$PUBLIC_URL" in
+		http://*) __warn "PUBLIC_URL uses http://. Ensure your reverse proxy sends X-Forwarded-Proto: https when terminating TLS, or set PUBLIC_URL=https://..." ;;
+	esac
 	PUBLIC_DOMAIN=$(printf '%s' "$PUBLIC_URL" | sed -e 's|^https\?://||' -e 's|/.*||' -e 's|:.*||')
 
 	# Auto-detect timezone from system configuration
 	HOST_TZ="America/New_York"
-	[ -f /etc/timezone ] && HOST_TZ=$(cat /etc/timezone)
-	[ -L /etc/localtime ] && HOST_TZ=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')
+	[ -f /etc/timezone ] && read -r HOST_TZ < /etc/timezone
+	[ -L /etc/localtime ] && { _rl=$(readlink /etc/localtime); HOST_TZ="${_rl##*/zoneinfo/}"; unset _rl; }
 	TZ="${TZ:-$HOST_TZ}"
 
 	# Core server settings
@@ -107,8 +122,8 @@ init_config() {
 	SMTP_PORT_DEFAULT="25"
 
 	# Generate random passwords for internal component authentication
-	JVB_AUTH_PASSWORD="$(randpass)"
-	JICOFO_AUTH_PASSWORD="$(randpass)"
+	JVB_AUTH_PASSWORD="$(__randpass)"
+	JICOFO_AUTH_PASSWORD="$(__randpass)"
 
 	# Branding customization
 	APP_NAME="${APP_NAME:-CasjaysDev Meet}"
@@ -154,7 +169,7 @@ init_config() {
 
 # Load existing .env file and export variables to environment
 # Preserves previous configuration when re-running installer
-load_existing_env() {
+__load_existing_env() {
 	[ -f "$ENV_FILE" ] || return 0
 	while IFS='=' read -r key value; do
 		# Skip comments and empty lines
@@ -171,23 +186,23 @@ load_existing_env() {
 
 # Detect the system's package manager
 # Returns: apt, dnf, yum, zypper, or pacman
-detect_pkg_mgr() {
+__detect_pkg_mgr() {
 	for pm in apt-get dnf yum zypper pacman; do
-		need_cmd "$pm" && echo "${pm%-get}" && return
+		__need_cmd "$pm" && echo "${pm%-get}" && return
 	done
-	die "No supported package manager found (apt/dnf/yum/zypper/pacman)."
+	__die "No supported package manager found (apt/dnf/yum/zypper/pacman)."
 }
 
 # Install Docker CE from official Docker repositories
 # Handles apt (Debian/Ubuntu), dnf (Fedora), yum (CentOS/RHEL),
 # zypper (openSUSE), and pacman (Arch)
-setup_docker_official() {
-	PM="$(detect_pkg_mgr)"
-	info "Installing Docker Engine using: $PM"
+__setup_docker_official() {
+	PM="$(__detect_pkg_mgr)"
+	__info "Installing Docker Engine using: $PM"
 
 	case "$PM" in
 	apt)
-		need_cmd gpg || { apt-get update && apt-get install -y gpg; }
+		__need_cmd gpg || { apt-get update && apt-get install -y gpg; }
 		apt-get update
 		apt-get install -y ca-certificates gnupg curl
 		install -m 0755 -d /etc/apt/keyrings
@@ -234,28 +249,28 @@ setup_docker_official() {
 
 # Check for Docker and Docker Compose, install if missing
 # Supports both new plugin (docker compose) and legacy (docker-compose)
-ensure_docker() {
-	if ! need_cmd docker; then
-		setup_docker_official
+__ensure_docker() {
+	if ! __need_cmd docker; then
+		__setup_docker_official
 	else
-		info "Docker already installed."
-		need_cmd systemctl && systemctl start docker 2>/dev/null || true
+		__info "Docker already installed."
+		__need_cmd systemctl && systemctl start docker 2>/dev/null || true
 	fi
 
 	# Check for Docker Compose (plugin or standalone)
 	if docker compose version >/dev/null 2>&1; then
-		info "Docker Compose plugin available."
-	elif need_cmd docker-compose; then
-		info "Legacy docker-compose available."
+		__info "Docker Compose plugin available."
+	elif __need_cmd docker-compose; then
+		__info "Legacy docker-compose available."
 	else
-		warn "Docker Compose not found; installing..."
-		setup_docker_official
+		__warn "Docker Compose not found; installing..."
+		__setup_docker_official
 	fi
 }
 
 # Wrapper to call docker compose with the correct syntax
 # Uses plugin syntax if available, falls back to legacy
-docker_compose() {
+__docker_compose() {
 	if docker compose version >/dev/null 2>&1; then
 		docker compose -f "$COMPOSE_FILE" "$@"
 	else
@@ -270,29 +285,29 @@ docker_compose() {
 # Handles backups, idempotent updates, and secret generation
 
 # Create timestamped backup of a file before modification
-backup_file() {
+__backup_file() {
 	[ -f "$1" ] || return 0
 	mkdir -p "$BACKUP_DIR"
-	cp -p "$1" "$BACKUP_DIR/$(basename "$1").$(timestamp)"
+	cp -p "$1" "$BACKUP_DIR/${1##*/}.$(__timestamp)"
 }
 
 # Create required directory structure for installation
-init_dirs() {
+__init_dirs() {
 	mkdir -p "$JITSI_BASE_DIR" "$JITSI_CONFIG_DIR" "$JITSI_DATA_DIR" "$BACKUP_DIR"
 }
 
 # Add a key=value pair to .env if it doesn't already exist
 # Used for adding new config options without overwriting existing ones
-ensure_env_key() {
+__ensure_env_key() {
 	grep -qE -- "^$1=" "$ENV_FILE" 2>/dev/null || printf '%s=%s\n' "$1" "$2" >>"$ENV_FILE"
 }
 
 # Generate the main .env configuration file
 # Only creates if not exists; preserves existing configuration
-gen_env_file() {
-	[ -f "$ENV_FILE" ] && { info "Found existing .env (preserving)."; return; }
+__gen_env_file() {
+	[ -f "$ENV_FILE" ] && { __info "Found existing .env (preserving)."; return; }
 
-	info "Creating default .env"
+	__info "Creating default .env"
 	cat >"$ENV_FILE" <<EOF
 # Jitsi Meet Configuration
 # Re-run install.sh to safely update
@@ -379,91 +394,94 @@ EOF
 
 # Ensure all configuration keys exist in .env
 # Adds any new keys introduced in updates without overwriting existing values
-ensure_all_env_keys() {
-	ensure_env_key JITSI_DATA_DIR "$JITSI_DATA_DIR"
-	ensure_env_key JITSI_CONFIG_DIR "$JITSI_CONFIG_DIR"
-	ensure_env_key SMTP_SERVER "$SMTP_SERVER_DEFAULT"
-	ensure_env_key SMTP_PORT "$SMTP_PORT_DEFAULT"
-	ensure_env_key SMTP_FROM "no-reply@$PUBLIC_DOMAIN"
-	ensure_env_key SMTP_USERNAME ""
-	ensure_env_key SMTP_PASSWORD ""
-	ensure_env_key SMTP_TLS "0"
-	ensure_env_key SMTP_STARTTLS "0"
-	ensure_env_key JITSI_IMAGE_TAG "$JITSI_TAG"
-	ensure_env_key AUTH_TYPE "$AUTH_TYPE"
-	ensure_env_key ENABLE_GUESTS "1"
-	ensure_env_key JICOFO_AUTH_USER "focus"
-	ensure_env_key JVB_AUTH_USER "jvb"
-	ensure_env_key JVB_UDP_PORT "10000"
-	ensure_env_key JVB_TCP_HARVESTER_DISABLED "true"
-	ensure_env_key APP_NAME "$APP_NAME"
-	ensure_env_key NATIVE_APP_NAME "$NATIVE_APP_NAME"
-	ensure_env_key PROVIDER_NAME "$PROVIDER_NAME"
-	ensure_env_key DEFAULT_LANGUAGE "$DEFAULT_LANGUAGE"
-	ensure_env_key ENABLE_WELCOME_PAGE "$ENABLE_WELCOME_PAGE"
-	ensure_env_key ENABLE_PREJOIN_PAGE "$ENABLE_PREJOIN_PAGE"
-	ensure_env_key ENABLE_LOBBY "$ENABLE_LOBBY"
-	ensure_env_key ENABLE_CLOSE_PAGE "$ENABLE_CLOSE_PAGE"
-	ensure_env_key DISABLE_AUDIO_LEVELS "$DISABLE_AUDIO_LEVELS"
-	ensure_env_key ENABLE_NOISY_MIC_DETECTION "$ENABLE_NOISY_MIC_DETECTION"
-	ensure_env_key ENABLE_BREAKOUT_ROOMS "$ENABLE_BREAKOUT_ROOMS"
-	ensure_env_key ENABLE_REGISTRATION "$ENABLE_REGISTRATION"
-	ensure_env_key ENABLE_JIBRI "$ENABLE_JIBRI"
-	ensure_env_key JIBRI_RECORDER_USER "recorder"
-	ensure_env_key JIBRI_XMPP_USER "jibri"
-	ensure_env_key ENABLE_RECORDING "$ENABLE_RECORDING"
-	ensure_env_key ENABLE_LIVESTREAMING "$ENABLE_LIVESTREAMING"
-	ensure_env_key ENABLE_FILE_RECORDING_SERVICE "$ENABLE_FILE_RECORDING_SERVICE"
-	ensure_env_key RESOLUTION "$RESOLUTION"
-	ensure_env_key RESOLUTION_MIN "$RESOLUTION_MIN"
-	ensure_env_key RESOLUTION_WIDTH "$RESOLUTION_WIDTH"
-	ensure_env_key RESOLUTION_WIDTH_MIN "$RESOLUTION_WIDTH_MIN"
-	ensure_env_key SHOW_JITSI_WATERMARK "$SHOW_JITSI_WATERMARK"
-	ensure_env_key JITSI_WATERMARK_LINK "$JITSI_WATERMARK_LINK"
-	ensure_env_key SHOW_BRAND_WATERMARK "$SHOW_BRAND_WATERMARK"
-	ensure_env_key BRAND_WATERMARK_LINK "$BRAND_WATERMARK_LINK"
+__ensure_all_env_keys() {
+	__ensure_env_key JITSI_DATA_DIR "$JITSI_DATA_DIR"
+	__ensure_env_key JITSI_CONFIG_DIR "$JITSI_CONFIG_DIR"
+	__ensure_env_key SMTP_SERVER "$SMTP_SERVER_DEFAULT"
+	__ensure_env_key SMTP_PORT "$SMTP_PORT_DEFAULT"
+	__ensure_env_key SMTP_FROM "no-reply@$PUBLIC_DOMAIN"
+	__ensure_env_key SMTP_USERNAME ""
+	__ensure_env_key SMTP_PASSWORD ""
+	__ensure_env_key SMTP_TLS "0"
+	__ensure_env_key SMTP_STARTTLS "0"
+	__ensure_env_key JITSI_IMAGE_TAG "$JITSI_TAG"
+	__ensure_env_key AUTH_TYPE "$AUTH_TYPE"
+	__ensure_env_key ENABLE_GUESTS "1"
+	__ensure_env_key JICOFO_AUTH_USER "focus"
+	__ensure_env_key JVB_AUTH_USER "jvb"
+	__ensure_env_key JVB_UDP_PORT "10000"
+	__ensure_env_key JVB_TCP_HARVESTER_DISABLED "true"
+	__ensure_env_key APP_NAME "$APP_NAME"
+	__ensure_env_key NATIVE_APP_NAME "$NATIVE_APP_NAME"
+	__ensure_env_key PROVIDER_NAME "$PROVIDER_NAME"
+	__ensure_env_key DEFAULT_LANGUAGE "$DEFAULT_LANGUAGE"
+	__ensure_env_key ENABLE_WELCOME_PAGE "$ENABLE_WELCOME_PAGE"
+	__ensure_env_key ENABLE_PREJOIN_PAGE "$ENABLE_PREJOIN_PAGE"
+	__ensure_env_key ENABLE_LOBBY "$ENABLE_LOBBY"
+	__ensure_env_key ENABLE_CLOSE_PAGE "$ENABLE_CLOSE_PAGE"
+	__ensure_env_key DISABLE_AUDIO_LEVELS "$DISABLE_AUDIO_LEVELS"
+	__ensure_env_key ENABLE_NOISY_MIC_DETECTION "$ENABLE_NOISY_MIC_DETECTION"
+	__ensure_env_key ENABLE_BREAKOUT_ROOMS "$ENABLE_BREAKOUT_ROOMS"
+	__ensure_env_key ENABLE_REGISTRATION "$ENABLE_REGISTRATION"
+	__ensure_env_key ENABLE_JIBRI "$ENABLE_JIBRI"
+	__ensure_env_key JIBRI_RECORDER_USER "recorder"
+	__ensure_env_key JIBRI_XMPP_USER "jibri"
+	__ensure_env_key ENABLE_RECORDING "$ENABLE_RECORDING"
+	__ensure_env_key ENABLE_LIVESTREAMING "$ENABLE_LIVESTREAMING"
+	__ensure_env_key ENABLE_FILE_RECORDING_SERVICE "$ENABLE_FILE_RECORDING_SERVICE"
+	__ensure_env_key RESOLUTION "$RESOLUTION"
+	__ensure_env_key RESOLUTION_MIN "$RESOLUTION_MIN"
+	__ensure_env_key RESOLUTION_WIDTH "$RESOLUTION_WIDTH"
+	__ensure_env_key RESOLUTION_WIDTH_MIN "$RESOLUTION_WIDTH_MIN"
+	__ensure_env_key SHOW_JITSI_WATERMARK "$SHOW_JITSI_WATERMARK"
+	__ensure_env_key JITSI_WATERMARK_LINK "$JITSI_WATERMARK_LINK"
+	__ensure_env_key SHOW_BRAND_WATERMARK "$SHOW_BRAND_WATERMARK"
+	__ensure_env_key BRAND_WATERMARK_LINK "$BRAND_WATERMARK_LINK"
 }
 
 # Generate missing passwords and secrets
 # Preserves existing secrets from .env or credentials file
 # Generates new random passwords for any empty fields
-fill_missing_secrets() {
+__fill_missing_secrets() {
 	. "$ENV_FILE"
 	changed=0
 
+	# __sed_inplace: portable in-place sed (BSD sed requires a backup extension)
+	__sed_inplace() { sed -i.bak "$1" "$2" && rm -f "$2.bak"; }
+
 	# Generate component authentication passwords if missing
 	if [ -z "${JICOFO_AUTH_PASSWORD:-}" ]; then
-		sed -i "s/^JICOFO_AUTH_PASSWORD=.*/JICOFO_AUTH_PASSWORD=$(randpass)/" "$ENV_FILE"
+		__sed_inplace "s/^JICOFO_AUTH_PASSWORD=.*/JICOFO_AUTH_PASSWORD=$(__randpass)/" "$ENV_FILE"
 		changed=1
 	fi
 	if [ -z "${JVB_AUTH_PASSWORD:-}" ]; then
-		sed -i "s/^JVB_AUTH_PASSWORD=.*/JVB_AUTH_PASSWORD=$(randpass)/" "$ENV_FILE"
+		__sed_inplace "s/^JVB_AUTH_PASSWORD=.*/JVB_AUTH_PASSWORD=$(__randpass)/" "$ENV_FILE"
 		changed=1
 	fi
 
 	# Generate Jibri passwords if Jibri is enabled
 	if [ "${ENABLE_JIBRI:-0}" = "1" ]; then
-		[ -z "${JIBRI_RECORDER_PASSWORD:-}" ] && sed -i "s/^JIBRI_RECORDER_PASSWORD=.*/JIBRI_RECORDER_PASSWORD=$(randpass)/" "$ENV_FILE" && changed=1
-		[ -z "${JIBRI_XMPP_PASSWORD:-}" ] && sed -i "s/^JIBRI_XMPP_PASSWORD=.*/JIBRI_XMPP_PASSWORD=$(randpass)/" "$ENV_FILE" && changed=1
+		[ -z "${JIBRI_RECORDER_PASSWORD:-}" ] && __sed_inplace "s/^JIBRI_RECORDER_PASSWORD=.*/JIBRI_RECORDER_PASSWORD=$(__randpass)/" "$ENV_FILE" && changed=1
+		[ -z "${JIBRI_XMPP_PASSWORD:-}" ] && __sed_inplace "s/^JIBRI_XMPP_PASSWORD=.*/JIBRI_XMPP_PASSWORD=$(__randpass)/" "$ENV_FILE" && changed=1
 	fi
 
 	# Get admin password from credentials file or generate new one
 	if [ -z "${ADMIN_PASS:-}" ]; then
 		if [ -f "$CREDS_FILE" ] && grep -q -- "^ADMIN_USER=$ADMIN_USER$" "$CREDS_FILE"; then
-			ADMIN_PASS="$(grep -- '^ADMIN_PASS=' "$CREDS_FILE" | head -1 | cut -d= -f2-)"
+			ADMIN_PASS="$(grep -m1 -- '^ADMIN_PASS=' "$CREDS_FILE" | sed 's/^ADMIN_PASS=//')"
 		else
-			ADMIN_PASS="$(randpass)"
+			ADMIN_PASS="$(__randpass)"
 		fi
 	fi
 
-	[ "$changed" -ne 1 ] || info "Generated missing credentials."
+	[ "$changed" -ne 1 ] || __info "Generated missing credentials."
 }
 
 # Generate docker-compose.yml with all services
 # Creates backups before overwriting existing file
-write_compose() {
-	backup_file "$COMPOSE_FILE"
-	info "Writing docker-compose.yml"
+__write_compose() {
+	__backup_file "$COMPOSE_FILE"
+	__info "Writing docker-compose.yml"
 
 	cat >"$COMPOSE_FILE" <<'YAML'
 services:
@@ -597,7 +615,7 @@ YAML
 
 	# Add Jibri if enabled
 	if [ "${ENABLE_JIBRI:-0}" = "1" ]; then
-		info "Adding Jibri to compose..."
+		__info "Adding Jibri to compose..."
 		cat >>"$COMPOSE_FILE" <<'JIBRI_YAML'
 
   jibri:
@@ -653,14 +671,14 @@ NET_YAML
 
 # Check and setup Jibri prerequisites (ALSA loopback module)
 # Jibri requires snd-aloop kernel module for audio capture
-check_jibri_prereqs() {
+__check_jibri_prereqs() {
 	[ "${ENABLE_JIBRI:-0}" = "1" ] || return 0
 
-	info "Checking Jibri prerequisites..."
+	__info "Checking Jibri prerequisites..."
 	# Load ALSA loopback module if not already loaded
 	if ! lsmod | grep -q -- snd_aloop; then
-		warn "ALSA loopback module (snd-aloop) not loaded."
-		modprobe snd-aloop 2>/dev/null || warn "Could not load snd-aloop."
+		__warn "ALSA loopback module (snd-aloop) not loaded."
+		modprobe snd-aloop 2>/dev/null || __warn "Could not load snd-aloop."
 		# Make it persistent across reboots
 		[ -d /etc/modules-load.d ] && echo "snd-aloop" >/etc/modules-load.d/jibri.conf
 	fi
@@ -670,17 +688,17 @@ check_jibri_prereqs() {
 }
 
 # Pull latest images and start all containers
-start_stack() {
-	info "Pulling images..."
-	docker_compose pull
-	info "Starting stack..."
-	docker_compose up -d
+__start_stack() {
+	__info "Pulling images..."
+	__docker_compose pull
+	__info "Starting stack..."
+	__docker_compose up -d
 }
 
 # Wait for Prosody XMPP server to be ready
 # Polls for up to 60 seconds before giving up
-wait_for_prosody() {
-	info "Waiting for Prosody..."
+__wait_for_prosody() {
+	__info "Waiting for Prosody..."
 	i=0
 	while [ "$i" -lt 30 ]; do
 		# Check if prosodyctl reports running status
@@ -690,23 +708,23 @@ wait_for_prosody() {
 		i=$((i + 1))
 		sleep 2
 	done
-	warn "Prosody readiness not confirmed; continuing."
+	__warn "Prosody readiness not confirmed; continuing."
 }
 
 # Register or update the admin user in Prosody
 # Uses auth.meet.jitsi domain (internal_hashed storage, where passwords are kept)
-register_admin_user() {
+__register_admin_user() {
 	. "$ENV_FILE"
 	# Admin accounts must be registered on auth.meet.jitsi, not meet.jitsi.
 	# meet.jitsi uses jitsi-anonymous authentication and has no password storage.
 	# auth.meet.jitsi uses internal_hashed and is the correct credentials domain.
 	domain="auth.meet.jitsi"
 
-	info "Registering admin user '${ADMIN_USER}'..."
+	__info "Registering admin user '${ADMIN_USER}'..."
 	# Try passwd first (for existing users), then register (for new users)
 	docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua passwd "$ADMIN_USER" "$domain" "$ADMIN_PASS" >/dev/null 2>&1 ||
 		docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua register "$ADMIN_USER" "$domain" "$ADMIN_PASS" >/dev/null 2>&1 ||
-		warn "Could not register admin user."
+		__warn "Could not register admin user."
 
 	# Save credentials with restricted permissions
 	umask 077
@@ -715,11 +733,11 @@ ADMIN_USER=$ADMIN_USER
 ADMIN_PASS=$ADMIN_PASS
 UPDATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 EOF
-	info "Credentials saved: $CREDS_FILE"
+	__info "Credentials saved: $CREDS_FILE"
 }
 
 # Display installation summary with important details
-post_summary() {
+__post_summary() {
 	. "$ENV_FILE"
 	cat <<EOF
 
@@ -746,52 +764,52 @@ EOF
 
 # Handle user management commands (add, del, pass, list)
 # Interacts directly with Prosody via prosodyctl
-user_management() {
+__user_management() {
 	action="${1:-}"
 	username="${2:-}"
 	password="${3:-}"
 
-	[ -f "$COMPOSE_FILE" ] || die "Jitsi not installed. Run installer first."
+	[ -f "$COMPOSE_FILE" ] || __die "Jitsi not installed. Run installer first."
 	# Strip domain part if provided
 	username=$(printf '%s' "$username" | sed 's/@.*//')
 
 	case "$action" in
 	add)
 		# Add new user with optional password (prompts if not provided)
-		[ -z "$username" ] && die "Usage: $0 --user add <username> [password]"
+		[ -z "$username" ] && __die "Usage: $0 --user add <username> [password]"
 		if [ -z "$password" ]; then
 			printf "Password for %s: " "$username"
 			stty -echo; read -r password; stty echo; printf "\n"
 		fi
-		[ -z "$password" ] && die "Password cannot be empty"
+		[ -z "$password" ] && __die "Password cannot be empty"
 		docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua register "$username" auth.meet.jitsi "$password" 2>/dev/null &&
-			info "User '$username' created" || die "Failed to create user"
+			__info "User '$username' created" || __die "Failed to create user"
 		;;
 	del|delete|rm)
 		# Delete existing user by removing the account data file directly.
 		# prosodyctl deluser requires mod_admin_shell which is not enabled in the
 		# casjaysdevdocker/prosody image; the flat-file backend stores each account
 		# as auth%2emeet%2ejitsi/accounts/<username>.dat so removal is equivalent.
-		[ -z "$username" ] && die "Usage: $0 --user del <username>"
+		[ -z "$username" ] && __die "Usage: $0 --user del <username>"
 		docker exec jitsi-prosody rm -f "/config/data/auth%2emeet%2ejitsi/accounts/$username.dat" 2>/dev/null &&
-			info "User '$username' deleted" || die "Failed to delete user"
+			__info "User '$username' deleted" || __die "Failed to delete user"
 		;;
 	pass|passwd|password)
 		# Change user password (always prompts for security)
-		[ -z "$username" ] && die "Usage: $0 --user pass <username>"
+		[ -z "$username" ] && __die "Usage: $0 --user pass <username>"
 		printf "New password for %s: " "$username"
 		stty -echo; read -r password; stty echo; printf "\n"
-		[ -z "$password" ] && die "Password cannot be empty"
+		[ -z "$password" ] && __die "Password cannot be empty"
 		docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua passwd "$username" auth.meet.jitsi "$password" 2>/dev/null &&
-			info "Password updated for '$username'" || die "Failed to update password"
+			__info "Password updated for '$username'" || __die "Failed to update password"
 		;;
 	list|ls)
 		# List all registered users
-		info "Registered users:"
+		__info "Registered users:"
 		docker exec jitsi-prosody ls /config/data/auth%2emeet%2ejitsi/accounts/ 2>/dev/null | sed 's/\.dat$//' || echo "No users"
 		;;
 	*)
-		die "Unknown action. Use: add, del, pass, list"
+		__die "Unknown action. Use: add, del, pass, list"
 		;;
 	esac
 	exit 0
@@ -803,16 +821,18 @@ user_management() {
 # Command-line interface handling for help, version, and removal
 
 # Display usage information and available options
-show_help() {
+__show_help() {
 	cat <<EOF
 Jitsi Meet Installer v${VERSION}
 
 Usage: $0 [OPTIONS]
 
 Options:
-  -h, --help      Show help
-  -v, --version   Show version
-  -r, --remove    Remove installation
+  -h, --help        Show help
+  -v, --version     Show version
+  -r, --remove      Remove installation
+  --debug           Enable trace output (set -x)
+  --no-color        Disable color output (also honoured via NO_COLOR env var)
 
 User Management:
   --user add <name> [pass]   Add user
@@ -839,22 +859,22 @@ EOF
 }
 
 # Display version number
-show_version() {
+__show_version() {
 	echo "Jitsi Meet Installer v${VERSION}"
 	exit 0
 }
 
 # Complete removal of Jitsi installation
 # Stops containers, removes images/volumes, and deletes all files
-do_remove() {
-	require_root "$@"
-	[ -d "$JITSI_BASE_DIR" ] || die "Not installed: $JITSI_BASE_DIR"
+__do_remove() {
+	__require_root "$@"
+	[ -d "$JITSI_BASE_DIR" ] || __die "Not installed: $JITSI_BASE_DIR"
 
-	info "Removing Jitsi..."
+	__info "Removing Jitsi..."
 	# Stop and remove all containers, images, and volumes
-	[ -f "$COMPOSE_FILE" ] && docker_compose down --rmi all --volumes 2>/dev/null || true
+	[ -f "$COMPOSE_FILE" ] && __docker_compose down --rmi all --volumes 2>/dev/null || true
 	rm -rf "$JITSI_BASE_DIR"
-	info "Jitsi removed."
+	__info "Jitsi removed."
 	exit 0
 }
 
@@ -865,19 +885,19 @@ do_remove() {
 
 # Main installation workflow
 # Executes all steps in order to install/update Jitsi
-main() {
-	require_root "$@"
-	ensure_docker
-	check_jibri_prereqs
-	init_dirs
-	gen_env_file
-	ensure_all_env_keys
-	fill_missing_secrets
-	write_compose
-	start_stack
-	wait_for_prosody
-	register_admin_user
-	post_summary
+__main() {
+	__require_root "$@"
+	__ensure_docker
+	__check_jibri_prereqs
+	__init_dirs
+	__gen_env_file
+	__ensure_all_env_keys
+	__fill_missing_secrets
+	__write_compose
+	__start_stack
+	__wait_for_prosody
+	__register_admin_user
+	__post_summary
 }
 
 # =============================================================================
@@ -885,26 +905,45 @@ main() {
 # =============================================================================
 
 # Initialize all configuration variables with defaults
-init_config
+__init_config
 
 # Parse command-line arguments
-REMOVE_MODE=0
-while [ $# -gt 0 ]; do
-	case "$1" in
-	-h|--help) show_help ;;
-	-v|--version) show_version ;;
-	-r|--remove) REMOVE_MODE=1; shift ;;
-	--user) shift; user_management "$@" ;;
-	--) shift; break ;;  # End of options marker
-	*) die "Unknown option: $1" ;;
+# getopts handles short options; the '-:' trick extends it to long options by
+# treating '-' as an option character and reading the long name from $OPTARG.
+INSTALL_REMOVE_MODE=0
+while getopts ":hvr-:" opt; do
+	case "$opt" in
+	h) __show_help ;;
+	v) __show_version ;;
+	r) INSTALL_REMOVE_MODE=1 ;;
+	-)
+		case "$OPTARG" in
+		help)             __show_help ;;
+		version)          __show_version ;;
+		remove)           INSTALL_REMOVE_MODE=1 ;;
+		debug)            DEBUG=1 ;;
+		no-color|no-colour) NO_COLOR=1 ;;
+		user)
+			# Shift past all getopts-consumed args, then hand off to subcommand
+			shift $((OPTIND - 1))
+			__user_management "$@"
+			;;
+		*)  __die "Unknown option: --$OPTARG" ;;
+		esac
+		;;
+	:)  __die "Option requires an argument: -$OPTARG" ;;
+	?)  __die "Unknown option: -$OPTARG" ;;
 	esac
 done
+shift $((OPTIND - 1))
+
+[ "$DEBUG" = "1" ] && set -x
 
 # Load existing configuration to preserve user settings
-[ "$REMOVE_MODE" = "0" ] && load_existing_env
+[ "$INSTALL_REMOVE_MODE" = "0" ] && __load_existing_env
 
 # Handle removal if requested
-[ "$REMOVE_MODE" = "1" ] && do_remove "$@"
+[ "$INSTALL_REMOVE_MODE" = "1" ] && __do_remove "$@"
 
 # Execute main installation
-main "$@"
+__main "$@"
