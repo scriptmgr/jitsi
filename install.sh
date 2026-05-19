@@ -46,6 +46,43 @@ __determine_hostname_name() {
   return 1
 }
 
+__is_ip4_public() {
+  local ip="${1:-}"
+  [[ -z "$ip" ]] && return 1
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local a b c d
+  IFS='.' read -r a b c d <<< "$ip"
+  (( a == 0 )) && return 1
+  (( a == 10 )) && return 1
+  (( a == 127 )) && return 1
+  (( a == 100 && b >= 64 && b <= 127 )) && return 1
+  (( a == 169 && b == 254 )) && return 1
+  (( a == 172 && b >= 16 && b <= 31 )) && return 1
+  (( a == 192 && b == 0 && c == 0 )) && return 1
+  (( a == 192 && b == 0 && c == 2 )) && return 1
+  (( a == 192 && b == 168 )) && return 1
+  (( a == 198 && b == 51 && c == 100 )) && return 1
+  (( a == 203 && b == 0 && c == 113 )) && return 1
+  (( a >= 224 )) && return 1
+  return 0
+}
+
+__get_hosts_ip4_address() {
+  if [[ -n "${IP4_ADDRESS:-}" ]]; then
+    printf '%s\n' "$IP4_ADDRESS"
+    return 0
+  fi
+  local ip url
+  for url in "https://ifcfg.us/ip" "https://ifconfig.co/ip" "https://checkip.amazonaws.com"; do
+    ip="$(curl -4 -q -LSs --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
+    if [[ -n "$ip" ]] && __is_ip4_public "$ip"; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
 __download_all_scripts_from_github() {
   local dest="${1:?Usage: __download_all_scripts_from_github <dest_dir>}"
   local GITHUB_RAW_REPO="${GITHUB_RAW_REPO:-scriptmgr/jitsi}"
@@ -117,6 +154,8 @@ __init_config() {
   local _host
   _host="$(__determine_hostname_name 2>/dev/null || hostname)"
   PUBLIC_URL="${PUBLIC_URL:-http://${_host}}"
+  # Public IP for JVB ICE candidate mapping — critical for NAT/Docker deployments
+  DOCKER_HOST_ADDRESS="${DOCKER_HOST_ADDRESS:-$(__get_hosts_ip4_address 2>/dev/null || true)}"
   # Strip trailing slash — a common paste error that breaks BOSH/WebSocket URLs
   PUBLIC_URL="${PUBLIC_URL%/}"
   # Validate scheme — must be http:// or https://
@@ -357,6 +396,7 @@ JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
 # Videobridge
 JVB_UDP_PORT=10000
 JVB_TCP_HARVESTER_DISABLED=true
+DOCKER_HOST_ADDRESS=${DOCKER_HOST_ADDRESS}
 
 # SMTP
 SMTP_SERVER=${SMTP_SERVER:-${SMTP_SERVER_DEFAULT}}
@@ -429,6 +469,7 @@ __ensure_all_env_keys() {
   __ensure_env_key JVB_AUTH_USER "jvb"
   __ensure_env_key JVB_UDP_PORT "10000"
   __ensure_env_key JVB_TCP_HARVESTER_DISABLED "true"
+  __ensure_env_key DOCKER_HOST_ADDRESS "${DOCKER_HOST_ADDRESS}"
   __ensure_env_key APP_NAME "${APP_NAME}"
   __ensure_env_key NATIVE_APP_NAME "${NATIVE_APP_NAME}"
   __ensure_env_key PROVIDER_NAME "${PROVIDER_NAME}"
@@ -570,6 +611,7 @@ services:
       - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
       - JVB_UDP_PORT=${JVB_UDP_PORT}
       - JVB_TCP_HARVESTER_DISABLED=${JVB_TCP_HARVESTER_DISABLED}
+      - DOCKER_HOST_ADDRESS=${DOCKER_HOST_ADDRESS}
     networks: [meet]
 
   web:
