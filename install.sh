@@ -284,7 +284,7 @@ init_dirs() {
 # Add a key=value pair to .env if it doesn't already exist
 # Used for adding new config options without overwriting existing ones
 ensure_env_key() {
-	grep -qE "^$1=" "$ENV_FILE" 2>/dev/null || printf '%s=%s\n' "$1" "$2" >>"$ENV_FILE"
+	grep -qE -- "^$1=" "$ENV_FILE" 2>/dev/null || printf '%s=%s\n' "$1" "$2" >>"$ENV_FILE"
 }
 
 # Generate the main .env configuration file
@@ -449,8 +449,8 @@ fill_missing_secrets() {
 
 	# Get admin password from credentials file or generate new one
 	if [ -z "${ADMIN_PASS:-}" ]; then
-		if [ -f "$CREDS_FILE" ] && grep -q "^ADMIN_USER=$ADMIN_USER$" "$CREDS_FILE"; then
-			ADMIN_PASS="$(grep '^ADMIN_PASS=' "$CREDS_FILE" | head -1 | cut -d= -f2-)"
+		if [ -f "$CREDS_FILE" ] && grep -q -- "^ADMIN_USER=$ADMIN_USER$" "$CREDS_FILE"; then
+			ADMIN_PASS="$(grep -- '^ADMIN_PASS=' "$CREDS_FILE" | head -1 | cut -d= -f2-)"
 		else
 			ADMIN_PASS="$(randpass)"
 		fi
@@ -658,7 +658,7 @@ check_jibri_prereqs() {
 
 	info "Checking Jibri prerequisites..."
 	# Load ALSA loopback module if not already loaded
-	if ! lsmod | grep -q snd_aloop; then
+	if ! lsmod | grep -q -- snd_aloop; then
 		warn "ALSA loopback module (snd-aloop) not loaded."
 		modprobe snd-aloop 2>/dev/null || warn "Could not load snd-aloop."
 		# Make it persistent across reboots
@@ -686,7 +686,7 @@ wait_for_prosody() {
 		# Check if prosodyctl reports running status
 		docker exec jitsi-prosody prosodyctl status >/dev/null 2>&1 && return
 		# Also check logs for ready indicators
-		docker logs jitsi-prosody 2>&1 | grep -qE "(Prosody is ready|Started|Activated)" && return
+		docker logs jitsi-prosody 2>&1 | grep -qE -- "(Prosody is ready|Started|Activated)" && return
 		i=$((i + 1))
 		sleep 2
 	done
@@ -694,12 +694,13 @@ wait_for_prosody() {
 }
 
 # Register or update the admin user in Prosody
-# Uses meet.jitsi domain (where web clients authenticate)
+# Uses auth.meet.jitsi domain (internal_hashed storage, where passwords are kept)
 register_admin_user() {
 	. "$ENV_FILE"
-	# Users must be registered on meet.jitsi (not auth.meet.jitsi)
-	# because the web client authenticates to this domain
-	domain="meet.jitsi"
+	# Admin accounts must be registered on auth.meet.jitsi, not meet.jitsi.
+	# meet.jitsi uses jitsi-anonymous authentication and has no password storage.
+	# auth.meet.jitsi uses internal_hashed and is the correct credentials domain.
+	domain="auth.meet.jitsi"
 
 	info "Registering admin user '${ADMIN_USER}'..."
 	# Try passwd first (for existing users), then register (for new users)
@@ -763,13 +764,16 @@ user_management() {
 			stty -echo; read -r password; stty echo; printf "\n"
 		fi
 		[ -z "$password" ] && die "Password cannot be empty"
-		docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua register "$username" meet.jitsi "$password" 2>/dev/null &&
+		docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua register "$username" auth.meet.jitsi "$password" 2>/dev/null &&
 			info "User '$username' created" || die "Failed to create user"
 		;;
 	del|delete|rm)
-		# Delete existing user
+		# Delete existing user by removing the account data file directly.
+		# prosodyctl deluser requires mod_admin_shell which is not enabled in the
+		# casjaysdevdocker/prosody image; the flat-file backend stores each account
+		# as auth%2emeet%2ejitsi/accounts/<username>.dat so removal is equivalent.
 		[ -z "$username" ] && die "Usage: $0 --user del <username>"
-		docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua deluser "$username@meet.jitsi" 2>/dev/null &&
+		docker exec jitsi-prosody rm -f "/config/data/auth%2emeet%2ejitsi/accounts/$username.dat" 2>/dev/null &&
 			info "User '$username' deleted" || die "Failed to delete user"
 		;;
 	pass|passwd|password)
@@ -778,13 +782,13 @@ user_management() {
 		printf "New password for %s: " "$username"
 		stty -echo; read -r password; stty echo; printf "\n"
 		[ -z "$password" ] && die "Password cannot be empty"
-		docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua passwd "$username" meet.jitsi "$password" 2>/dev/null &&
+		docker exec jitsi-prosody prosodyctl --config /config/prosody.cfg.lua passwd "$username" auth.meet.jitsi "$password" 2>/dev/null &&
 			info "Password updated for '$username'" || die "Failed to update password"
 		;;
 	list|ls)
 		# List all registered users
 		info "Registered users:"
-		docker exec jitsi-prosody ls /config/data/meet%2ejitsi/accounts/ 2>/dev/null | sed 's/\.dat$//' || echo "No users"
+		docker exec jitsi-prosody ls /config/data/auth%2emeet%2ejitsi/accounts/ 2>/dev/null | sed 's/\.dat$//' || echo "No users"
 		;;
 	*)
 		die "Unknown action. Use: add, del, pass, list"
