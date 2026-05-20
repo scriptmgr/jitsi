@@ -23,9 +23,6 @@
 
 APPNAME="${0##*/}"
 VERSION="202605190929-git"
-RUN_USER="${USER}"
-SET_UID="${UID}"
-SCRIPT_SRC_DIR="${BASH_SOURCE%/*}"
 
 set -euo pipefail
 
@@ -50,8 +47,8 @@ __is_ip4_public() {
   local ip="${1:-}"
   [[ -z "$ip" ]] && return 1
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-  local a b c d
-  IFS='.' read -r a b c d <<< "$ip"
+  local a b c
+  IFS='.' read -r a b c _ <<< "$ip"
   (( a == 0 )) && return 1
   (( a == 10 )) && return 1
   (( a == 127 )) && return 1
@@ -244,6 +241,10 @@ __init_config() {
   NGINX_VHOST_DIR="${NGINX_VHOST_DIR:-/etc/nginx/vhosts.d}"
   NGINX_VHOST_FILE="${NGINX_VHOST_DIR}/${PUBLIC_DOMAIN}.conf"
   WRITE_NGINX_VHOST="${WRITE_NGINX_VHOST:-1}"
+  # SSL cert directory — defaults to the standard letsencrypt path for PUBLIC_DOMAIN.
+  # Override when PUBLIC_DOMAIN is a subdomain (e.g. meet.example.com) and the cert
+  # lives under the parent domain or a wildcard name (e.g. /etc/letsencrypt/live/example.com).
+  NGINX_SSL_CERT_DIR="${NGINX_SSL_CERT_DIR:-/etc/letsencrypt/live/${PUBLIC_DOMAIN}}"
 
   # Watermark/branding overlay settings
   SHOW_JITSI_WATERMARK="${SHOW_JITSI_WATERMARK:-false}"
@@ -486,8 +487,11 @@ ENABLE_SUBDOMAIN_ROOMS=${ENABLE_SUBDOMAIN_ROOMS}
 
 # nginx vhost generation
 # Set WRITE_NGINX_VHOST=0 to skip writing the vhost file
+# Set NGINX_SSL_CERT_DIR when the cert lives under a different name, e.g.:
+#   /etc/letsencrypt/live/example.com  (wildcard *.example.com covers meet.example.com)
 NGINX_VHOST_DIR=${NGINX_VHOST_DIR}
 WRITE_NGINX_VHOST=${WRITE_NGINX_VHOST}
+NGINX_SSL_CERT_DIR=${NGINX_SSL_CERT_DIR}
 EOF
 }
 
@@ -542,6 +546,7 @@ __ensure_all_env_keys() {
   __ensure_env_key ENABLE_SUBDOMAIN_ROOMS "${ENABLE_SUBDOMAIN_ROOMS}"
   __ensure_env_key NGINX_VHOST_DIR "${NGINX_VHOST_DIR}"
   __ensure_env_key WRITE_NGINX_VHOST "${WRITE_NGINX_VHOST}"
+  __ensure_env_key NGINX_SSL_CERT_DIR "${NGINX_SSL_CERT_DIR}"
 }
 
 __fill_missing_secrets() {
@@ -861,7 +866,7 @@ __write_nginx_vhost() {
       -e "s|REPLACE_NGINX_PORT|443|g" \
       -e "s|REPLACE_SERVER_LISTEN_OPTS|ssl|g" \
       -e "s|REPLACE_HOST_PROXY|http://127.0.0.1:80|g" \
-      -e "s|/etc/letsencrypt/live/domain/|/etc/letsencrypt/live/${PUBLIC_DOMAIN}/|g" \
+      -e "s|/etc/letsencrypt/live/domain/|${NGINX_SSL_CERT_DIR}/|g" \
       -e 's|\$connection_upgrade|"upgrade"|g' \
       "${_template}" > "${NGINX_VHOST_FILE}"
   else
@@ -872,8 +877,8 @@ server {
   listen 443 ssl;
   listen [::]:443 ssl;
   server_name ${PUBLIC_DOMAIN} *.${PUBLIC_DOMAIN};
-  ssl_certificate                 /etc/letsencrypt/live/${PUBLIC_DOMAIN}/fullchain.pem;
-  ssl_certificate_key             /etc/letsencrypt/live/${PUBLIC_DOMAIN}/privkey.pem;
+  ssl_certificate                 ${NGINX_SSL_CERT_DIR}/fullchain.pem;
+  ssl_certificate_key             ${NGINX_SSL_CERT_DIR}/privkey.pem;
   ssl_protocols                   TLSv1.2 TLSv1.3;
   ssl_prefer_server_ciphers       off;
   add_header                      Strict-Transport-Security "max-age=7200";
@@ -909,8 +914,8 @@ server {
   listen 443 ssl;
   listen [::]:443 ssl;
   server_name ~^(?P<room>[^.]+)\\.${_domain_escaped}\$;
-  ssl_certificate                 /etc/letsencrypt/live/${PUBLIC_DOMAIN}/fullchain.pem;
-  ssl_certificate_key             /etc/letsencrypt/live/${PUBLIC_DOMAIN}/privkey.pem;
+  ssl_certificate                 ${NGINX_SSL_CERT_DIR}/fullchain.pem;
+  ssl_certificate_key             ${NGINX_SSL_CERT_DIR}/privkey.pem;
   ssl_protocols                   TLSv1.2 TLSv1.3;
   ssl_prefer_server_ciphers       off;
   client_max_body_size            0;
