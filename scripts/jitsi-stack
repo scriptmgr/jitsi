@@ -23,9 +23,12 @@
 
 APPNAME="${0##*/}"
 VERSION="YYYYMMDDHHMM-git"
-RUN_USER="${USER}"
-SET_UID="${UID}"
-SCRIPT_SRC_DIR="${BASH_SOURCE%/*}"
+RUN_USER="${USER:-$(id -un)}"
+SET_UID="${UID:-$(id -u)}"
+SCRIPT_SRC_DIR="${BASH_SOURCE[0]%/*}"
+
+# Suppress shellcheck unused warnings on standard boilerplate
+export RUN_USER SET_UID SCRIPT_SRC_DIR
 
 set -euo pipefail
 
@@ -66,6 +69,7 @@ __is_ip4_public() {
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
   local a b c d
   IFS='.' read -r a b c d <<< "$ip"
+  : "${d}"  # d is parsed for completeness but only a/b/c are tested
   (( a == 0 )) && return 1
   (( a == 10 )) && return 1
   (( a == 127 )) && return 1
@@ -140,13 +144,23 @@ __require_installed() {
   [[ -f "${JITSISTACK_COMPOSE_FILE}" ]] || __die "Jitsi not installed. Run install.sh first."
 }
 
-# Wrapper: prefers docker compose plugin, falls back to docker-compose
+# Wrapper: prefers docker compose plugin, falls back to docker-compose.
+# Detection is cached in JITSISTACK_COMPOSE_CMD on first call.
+JITSISTACK_COMPOSE_CMD=""
 __docker_compose() {
-  if docker compose version >/dev/null 2>&1; then
-    docker compose -f "${JITSISTACK_COMPOSE_FILE}" "$@"
-  else
-    docker-compose -f "${JITSISTACK_COMPOSE_FILE}" "$@"
+  if [[ -z "${JITSISTACK_COMPOSE_CMD}" ]]; then
+    if docker compose version >/dev/null 2>&1; then
+      JITSISTACK_COMPOSE_CMD="plugin"
+    elif command -v docker-compose >/dev/null 2>&1; then
+      JITSISTACK_COMPOSE_CMD="legacy"
+    else
+      __die "Neither 'docker compose' plugin nor 'docker-compose' is available."
+    fi
   fi
+  case "${JITSISTACK_COMPOSE_CMD}" in
+    plugin) docker compose -f "${JITSISTACK_COMPOSE_FILE}" "$@" ;;
+    legacy) docker-compose -f "${JITSISTACK_COMPOSE_FILE}" "$@" ;;
+  esac
 }
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -175,7 +189,14 @@ Options:
   --no-color       Disable color output
 
 Environment:
-  JITSI_BASE_DIR   Installation directory (default: /opt/jitsi)
+  JITSI_BASE_DIR    Installation directory (default: /opt/jitsi)
+  JITSISTACK_DEBUG  Set to 1 to enable trace output (same as --debug)
+  NO_COLOR          Set to disable color output
+
+Notes:
+  The Prosody container binds on INTERNAL_PROXY_IP:HTTP_PORT (both read
+  from \${JITSI_BASE_DIR}/.env). Terminate TLS with an external reverse
+  proxy (nginx, Caddy, Traefik) and forward to that bind address.
 
 Examples:
   ${APPNAME} start
@@ -215,36 +236,67 @@ __stack_restart() {
 }
 
 __stack_status() {
-  local public_url="" http_port="" enable_auth=""
+  local public_url="" http_port="" internal_ip="" enable_auth="" enable_subdomain=""
+  local key value line
 
-  # Read key values from .env
+  # Read key values from .env (skip comments/blanks, strip surrounding quotes)
   if [[ -f "${JITSISTACK_ENV_FILE}" ]]; then
-    while IFS='=' read -r key value; do
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      # strip leading whitespace
+      line="${line#"${line%%[![:space:]]*}"}"
+      # skip blank lines and comments
+      [[ -z "${line}" || "${line}" == \#* ]] && continue
+      # split on first '='
+      key="${line%%=*}"
+      value="${line#*=}"
+      # strip surrounding single or double quotes
+      case "${value}" in
+        \"*\") value="${value#\"}"; value="${value%\"}" ;;
+        \'*\') value="${value#\'}"; value="${value%\'}" ;;
+      esac
       case "${key}" in
-        PUBLIC_URL)   public_url="${value}" ;;
-        HTTP_PORT)    http_port="${value}" ;;
-        ENABLE_AUTH)  enable_auth="${value}" ;;
+        PUBLIC_URL)              public_url="${value}" ;;
+        HTTP_PORT)               http_port="${value}" ;;
+        INTERNAL_PROXY_IP)       internal_ip="${value}" ;;
+        ENABLE_AUTH)             enable_auth="${value}" ;;
+        ENABLE_SUBDOMAIN_ROOMS)  enable_subdomain="${value}" ;;
       esac
     done < "${JITSISTACK_ENV_FILE}"
   fi
 
-  local fqdn ip4 ip6
+  local fqdn ip4 ip6 bind
   fqdn="$(__determine_hostname_name 2>/dev/null || hostname)"
   ip4="$(__get_hosts_ip4_address 2>/dev/null || true)"
   ip6="$(__get_hosts_ip6_address 2>/dev/null || true)"
+
+  # Compose the actual bind address (what Prosody listens on inside the host)
+  if [[ -n "${internal_ip}" && -n "${http_port}" ]]; then
+    bind="${internal_ip}:${http_port}"
+  elif [[ -n "${http_port}" ]]; then
+    bind="0.0.0.0:${http_port}"
+  else
+    bind=""
+  fi
 
   printf '\n'
   printf '============================================================\n'
   printf 'Jitsi Meet Stack Status\n'
   printf '============================================================\n'
   printf 'Hostname:        %s\n' "${fqdn}"
-  [[ -n "${ip4}" ]] && printf 'IPv4:            %s\n' "${ip4}"
-  [[ -n "${ip6}" ]] && printf 'IPv6:            %s\n' "${ip6}"
-  [[ -n "${public_url}" ]] && printf 'Public URL:      %s\n' "${public_url}"
-  [[ -n "${http_port}" ]] && printf 'HTTP Port:       %s\n' "${http_port}"
-  [[ -n "${enable_auth}" ]] && printf 'Auth Required:   %s\n' "${enable_auth}"
+  [[ -n "${ip4}" ]]              && printf 'IPv4:            %s\n' "${ip4}"
+  [[ -n "${ip6}" ]]              && printf 'IPv6:            %s\n' "${ip6}"
+  [[ -n "${public_url}" ]]       && printf 'Public URL:      %s\n' "${public_url}"
+  [[ -n "${internal_ip}" ]]      && printf 'Internal IP:     %s\n' "${internal_ip}"
+  [[ -n "${http_port}" ]]        && printf 'HTTP Port:       %s\n' "${http_port}"
+  [[ -n "${bind}" ]]             && printf 'Bind Address:    %s\n' "${bind}"
+  [[ -n "${enable_auth}" ]]      && printf 'Auth Required:   %s\n' "${enable_auth}"
+  [[ -n "${enable_subdomain}" ]] && printf 'Subdomain Rooms: %s\n' "${enable_subdomain}"
   printf '------------------------------------------------------------\n'
-  __docker_compose ps
+  if [[ -f "${JITSISTACK_COMPOSE_FILE}" ]]; then
+    __docker_compose ps
+  else
+    __warn "Stack not installed at ${JITSISTACK_BASE_DIR} — run install.sh first."
+  fi
   printf '\n'
 }
 
@@ -266,18 +318,44 @@ __stack_update() {
 }
 
 __stack_backup() {
-  local ts
+  __need_cmd tar || __die "tar is not installed or not in PATH."
+
+  local ts archive tar_log rc
   ts="$(date +%Y%m%d-%H%M%S)"
-  local archive="${JITSISTACK_BACKUP_DIR}/jitsi-backup-${ts}.tar.gz"
+  archive="${JITSISTACK_BACKUP_DIR}/jitsi-backup-${ts}.tar.gz"
   mkdir -p "${JITSISTACK_BACKUP_DIR}"
 
-  __info "Creating backup: ${archive}"
-  tar -czf "${archive}" \
-    -C "${JITSISTACK_BASE_DIR}" \
-    --exclude="backup" \
-    . 2>/dev/null || __warn "Some files could not be archived (check permissions)."
+  # Backups may contain .env with secrets — restrict to owner only
+  ( umask 077 && : > "${archive}" ) || __die "Cannot create backup file: ${archive}"
 
-  __info "Backup saved: ${archive}"
+  tar_log="$(mktemp -t "jitsi-stack-backup-XXXXXX.log")"
+  # Always remove the log on exit from this function
+  trap 'rm -f "${tar_log}"' RETURN
+
+  __info "Creating backup: ${archive}"
+  # Exclude the backup dir itself (avoid recursion) and transient runtime state.
+  # tar exit code 1 = "some files changed during read" — acceptable on a live stack.
+  set +e
+  tar --create --gzip \
+    --file="${archive}" \
+    -C "${JITSISTACK_BASE_DIR}" \
+    --exclude='./backup' \
+    --exclude='./backup/*' \
+    --exclude='./*.tar.gz' \
+    . 2>"${tar_log}"
+  rc=$?
+  set -e
+
+  if (( rc == 0 )); then
+    __info "Backup saved: ${archive}"
+  elif (( rc == 1 )); then
+    __warn "Backup completed with warnings (files changed during read): ${archive}"
+    [[ -s "${tar_log}" ]] && sed 's/^/  tar: /' "${tar_log}" >&2
+  else
+    __warn "tar exited with status ${rc}"
+    [[ -s "${tar_log}" ]] && sed 's/^/  tar: /' "${tar_log}" >&2
+    __die "Backup failed: ${archive}"
+  fi
 }
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -288,9 +366,15 @@ __main() {
   __need_cmd docker || __die "docker is not installed or not in PATH."
 
   local cmd="${1:-}"
-  shift || true
+  [[ -n "${cmd}" ]] && shift
 
-  # status is the only command that doesn't strictly require the stack running
+  # No command → show help and exit non-zero
+  if [[ -z "${cmd}" ]]; then
+    __help
+    exit 1
+  fi
+
+  # status renders even when the stack isn't installed; all other commands need it
   [[ "${cmd}" != "status" ]] && __require_installed
 
   case "${cmd}" in
@@ -301,14 +385,19 @@ __main() {
     logs)     __stack_logs "$@" ;;
     update)   __stack_update ;;
     backup)   __stack_backup ;;
-    "")  __help; exit 1 ;;
-    *)   __die "Unknown command: ${cmd}. Use: start, stop, restart, status, logs, update, backup" ;;
+    *)        __die "Unknown command: ${cmd}. Use: start, stop, restart, status, logs, update, backup" ;;
   esac
 }
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # Argument parsing
 # - - - - - - - - - - - - - - - - - - - - - - - - -
+
+# Require GNU getopt (the -T probe returns 4 on enhanced/GNU getopt)
+__getopt_rc=0
+getopt -T >/dev/null 2>&1 || __getopt_rc=$?
+(( __getopt_rc == 4 )) || __die "GNU getopt is required (util-linux). Install it via your package manager."
+unset __getopt_rc
 
 _OPTS="$(getopt -o hv -l help,version,debug,no-color -n "${APPNAME}" -- "$@")" \
   || { __help; exit 1; }
@@ -318,7 +407,7 @@ while true; do
     -h|--help)    __help; exit 0 ;;
     -v|--version) __version; exit 0 ;;
     --debug)      JITSISTACK_DEBUG=1; shift ;;
-    --no-color)   NO_COLOR=1; shift ;;
+    --no-color)   export NO_COLOR=1; shift ;;
     --)           shift; break ;;
     *)            break ;;
   esac
