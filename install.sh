@@ -897,15 +897,23 @@ EOF
 
   if [[ "${ENABLE_SUBDOMAIN_ROOMS:-1}" == "1" ]]; then
     cat <<EOF
-    # Wildcard subdomain → conference room (proxy, NOT redirect)
+    # Wildcard subdomain → conference room
     # -------------------------------------------------------
-    # room.${PUBLIC_DOMAIN} serves the Jitsi room inline — no URL change.
-    # Works in web browsers AND native Jitsi apps (iOS/Android/desktop).
-    # A redirect would break native apps by sending them to a different server.
+    # Two-step design — handles browsers, native apps, and the
+    # standup.${PUBLIC_DOMAIN}/standup double-path edge case:
     #
-    # Examples:
-    #   standup.${PUBLIC_DOMAIN}     loads ${PUBLIC_DOMAIN}/standup
-    #   teamcall.${PUBLIC_DOMAIN}    loads ${PUBLIC_DOMAIN}/teamcall
+    #  Step 1  room.${PUBLIC_DOMAIN}/
+    #          → same-domain 302 to room.${PUBLIC_DOMAIN}/room
+    #            (same hostname keeps native app connections alive;
+    #             browser URL becomes /room so Jitsi reads room correctly;
+    #             a cross-domain redirect to ${PUBLIC_DOMAIN}/room would
+    #             change the server and break native app WebSocket sessions)
+    #
+    #  Step 2  room.${PUBLIC_DOMAIN}/room  (and any other path)
+    #          → proxy_pass to prosody with Host: ${PUBLIC_DOMAIN}
+    #            (prosody serves the correct Jitsi config for the base domain;
+    #             the edge case room.${PUBLIC_DOMAIN}/room hits this block
+    #             directly and proxies /room — no double-room problem)
     #
     # Requires a *.${PUBLIC_DOMAIN} wildcard SSL cert on this server.
     server {
@@ -913,24 +921,16 @@ EOF
         server_name ~^(?P<room>[^.]+)\\.${PUBLIC_DOMAIN//./\\.}\$;
         # ssl_certificate / ssl_certificate_key — wildcard cert here
 
-        # Root path: rewrite internally to /{room} on the base domain.
-        # proxy_pass with a URI suffix rewrites the path before forwarding.
+        # Step 1: root only → same-domain redirect to /{room}
+        # nginx builds the Location header from the current scheme+host,
+        # so this becomes: https://standup.${PUBLIC_DOMAIN}/standup
         location = / {
-            proxy_pass         http://127.0.0.1:80/\$room;
-            proxy_http_version 1.1;
-            proxy_set_header   Upgrade    \$http_upgrade;
-            proxy_set_header   Connection "upgrade";
-            # Use base domain as Host so prosody serves the right config
-            proxy_set_header   Host              ${PUBLIC_DOMAIN};
-            proxy_set_header   X-Real-IP         \$remote_addr;
-            proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
-            proxy_set_header   X-Forwarded-Proto https;
-            proxy_read_timeout 900s;
-            proxy_send_timeout 900s;
+            return 302 /\$room;
         }
 
-        # All other paths (static assets, config.js, BOSH, WS, colibri-WS)
-        # pass through unchanged so the room page and app connections work.
+        # Step 2: all paths (/{room} after redirect, assets, BOSH, WS, colibri-WS)
+        # Proxy to prosody; Host header set to base domain so prosody's internal
+        # web server serves the correct Jitsi instance config.
         location / {
             proxy_pass         http://127.0.0.1:80;
             proxy_http_version 1.1;
