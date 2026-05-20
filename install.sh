@@ -235,6 +235,11 @@ __init_config() {
   RESOLUTION_WIDTH="${RESOLUTION_WIDTH:-1280}"
   RESOLUTION_WIDTH_MIN="${RESOLUTION_WIDTH_MIN:-320}"
 
+  # Wildcard subdomain → conference room redirect
+  # When enabled, <room>.yourdomain.com redirects to yourdomain.com/<room>
+  # Requires a wildcard SSL cert (*.yourdomain.com) on the frontend proxy.
+  ENABLE_SUBDOMAIN_ROOMS="${ENABLE_SUBDOMAIN_ROOMS:-1}"
+
   # Watermark/branding overlay settings
   SHOW_JITSI_WATERMARK="${SHOW_JITSI_WATERMARK:-false}"
   JITSI_WATERMARK_LINK="${JITSI_WATERMARK_LINK:-}"
@@ -468,6 +473,11 @@ SHOW_JITSI_WATERMARK=${SHOW_JITSI_WATERMARK}
 JITSI_WATERMARK_LINK=${JITSI_WATERMARK_LINK}
 SHOW_BRAND_WATERMARK=${SHOW_BRAND_WATERMARK}
 BRAND_WATERMARK_LINK=${BRAND_WATERMARK_LINK}
+
+# Wildcard subdomain room redirect (1=enabled)
+# <room>.${PUBLIC_DOMAIN} -> ${PUBLIC_URL}/<room>
+# Requires *.${PUBLIC_DOMAIN} SSL cert on the frontend proxy
+ENABLE_SUBDOMAIN_ROOMS=${ENABLE_SUBDOMAIN_ROOMS}
 EOF
 }
 
@@ -519,6 +529,7 @@ __ensure_all_env_keys() {
   __ensure_env_key JITSI_WATERMARK_LINK "${JITSI_WATERMARK_LINK}"
   __ensure_env_key SHOW_BRAND_WATERMARK "${SHOW_BRAND_WATERMARK}"
   __ensure_env_key BRAND_WATERMARK_LINK "${BRAND_WATERMARK_LINK}"
+  __ensure_env_key ENABLE_SUBDOMAIN_ROOMS "${ENABLE_SUBDOMAIN_ROOMS}"
 }
 
 __fill_missing_secrets() {
@@ -816,6 +827,35 @@ EOF
 __post_summary() {
   # shellcheck source=/dev/null
   . "${ENV_FILE}"
+
+  # Shared proxy location block — used in both vhost snippets below
+  local _proxy_block
+  _proxy_block="        location / {
+            proxy_pass         http://127.0.0.1:80;
+            proxy_http_version 1.1;
+
+            # WebSocket upgrade — required for XMPP-WS and colibri-WS
+            proxy_set_header Upgrade    \$http_upgrade;
+            proxy_set_header Connection \"upgrade\";
+
+            # Pass real client identity to the internal web server
+            proxy_set_header Host              \$host;
+            proxy_set_header X-Real-IP         \$remote_addr;
+            proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto  https;
+
+            # Long timeouts for persistent WebSocket connections
+            proxy_read_timeout 900s;
+            proxy_send_timeout 900s;
+        }"
+
+  local _security_headers
+  _security_headers="        # Security headers
+        add_header X-Frame-Options SAMEORIGIN always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header X-XSS-Protection \"1; mode=block\" always;
+        add_header Referrer-Policy no-referrer always;"
+
   cat <<EOF
 
 ============================================================
@@ -826,6 +866,7 @@ Auth Enabled:    ${ENABLE_AUTH} (0=open, 1=required)
 Admin User:      ${ADMIN_USER}
 Credentials:     ${CREDS_FILE}
 Jibri:           ${ENABLE_JIBRI:-0}
+Subdomain Rooms: ${ENABLE_SUBDOMAIN_ROOMS} (*.${PUBLIC_DOMAIN} -> room redirect)
 ------------------------------------------------------------
 Operational scripts installed to: /usr/local/bin
   jitsi-user   — manage user accounts
@@ -837,48 +878,48 @@ REVERSE PROXY SETUP
 Prosody's internal web server (port 80) handles ALL Jitsi routing:
   web app, /http-bind (BOSH), /xmpp-websocket, /colibri-ws/ (JVB)
 
-On your frontend server, create one vhost per domain and point it to:
-  http://127.0.0.1:80  (if prosody is on the same host)
-  http://{prosody_ip}:80  (if prosody is on a separate host)
+Point your frontend proxy at: http://127.0.0.1:80
+Works for any domain: ${PUBLIC_DOMAIN}, *.${PUBLIC_DOMAIN}, teams.lan, etc.
 
-Works for any domain pattern:
-  ${PUBLIC_DOMAIN}, *.meet.example.com, teams.internal.lan, etc.
+--- /etc/nginx/sites-available/${PUBLIC_DOMAIN}.conf ---
 
-Example nginx vhost (add SSL/cert config for your provider):
-
+    # Main Jitsi vhost
     server {
         listen 443 ssl;
         server_name ${PUBLIC_DOMAIN};
+        # ssl_certificate / ssl_certificate_key / ssl_protocols — add here
 
-        # Security headers — set here so they apply regardless of backend
-        add_header X-Frame-Options SAMEORIGIN always;
-        add_header X-Content-Type-Options nosniff always;
-        add_header X-XSS-Protection "1; mode=block" always;
-        add_header Referrer-Policy no-referrer always;
+${_security_headers}
 
-        location / {
-            proxy_pass         http://127.0.0.1:80;
-            proxy_http_version 1.1;
+${_proxy_block}
+    }
+EOF
 
-            # WebSocket upgrade — required for XMPP-WS and colibri-WS
-            proxy_set_header Upgrade    \$http_upgrade;
-            proxy_set_header Connection "upgrade";
+  if [[ "${ENABLE_SUBDOMAIN_ROOMS:-1}" == "1" ]]; then
+    cat <<EOF
+    # Wildcard subdomain → room redirect
+    # <room>.${PUBLIC_DOMAIN}  ──>  https://${PUBLIC_DOMAIN}/<room>
+    # Requires a *.${PUBLIC_DOMAIN} wildcard SSL cert on this server.
+    #
+    # Examples:
+    #   myrandomsub.${PUBLIC_DOMAIN}  ->  https://${PUBLIC_DOMAIN}/myrandomsub
+    #   standup.${PUBLIC_DOMAIN}      ->  https://${PUBLIC_DOMAIN}/standup
+    server {
+        listen 443 ssl;
+        server_name ~^(?P<room>[^.]+)\\.${PUBLIC_DOMAIN//./\\.}\$;
+        # ssl_certificate / ssl_certificate_key — use wildcard cert here
 
-            # Pass real client identity to the internal web server
-            proxy_set_header Host             \$host;
-            proxy_set_header X-Real-IP        \$remote_addr;
-            proxy_set_header X-Forwarded-For  \$proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto https;
-
-            # Long timeouts for persistent WebSocket connections
-            proxy_read_timeout 900s;
-            proxy_send_timeout 900s;
-        }
+        return 301 https://${PUBLIC_DOMAIN}/\$room\$is_args\$args;
     }
 
+EOF
+  fi
+
+  cat <<EOF
+--- end of nginx config ---
+
 FIREWALL: open UDP port 10000 for JVB media (audio/video RTP).
-          If clients are behind restrictive firewalls, add a TURN server.
-      If clients are behind strict firewalls, consider adding a TURN server.
+          If clients are behind restrictive firewalls, consider a TURN server.
 ------------------------------------------------------------
 EOF
 }
@@ -901,18 +942,21 @@ Options:
   --no-color        Disable color output (also honoured via NO_COLOR env var)
 
 Environment Variables:
-  PUBLIC_URL          Public URL (default: http://hostname)
-  ENABLE_AUTH         0=open, 1=auth required (default: 0)
-  ADMIN_USER          Admin username (default: administrator)
-  ADMIN_PASS          Admin password (default: generated)
-  HTTP_PORT           HTTP port (default: 64453)
-  APP_NAME            Application name
-  ENABLE_JIBRI        Enable recording (default: 0)
-  GITHUB_RAW_REPO     GitHub repo for scripts (default: scriptmgr/jitsi)
+  PUBLIC_URL              Public URL (default: http://hostname)
+  ENABLE_AUTH             0=open, 1=auth required (default: 0)
+  ADMIN_USER              Admin username (default: administrator)
+  ADMIN_PASS              Admin password (default: generated)
+  APP_NAME                Application name
+  ENABLE_JIBRI            Enable recording (default: 0)
+  ENABLE_SUBDOMAIN_ROOMS  1=redirect <room>.domain -> domain/<room> (default: 1)
+                          Requires a wildcard SSL cert on the frontend proxy.
+  DOCKER_HOST_ADDRESS     Public IP for JVB ICE (auto-detected if not set)
+  GITHUB_RAW_REPO         GitHub repo for scripts (default: scriptmgr/jitsi)
 
 Examples:
   sudo bash ${APPNAME}
-  PUBLIC_URL=https://meet.example.com sudo -E bash ${APPNAME}
+  PUBLIC_URL=https://casjay.me sudo -E bash ${APPNAME}
+  PUBLIC_URL=https://casjay.me ENABLE_SUBDOMAIN_ROOMS=1 sudo -E bash ${APPNAME}
   sudo bash ${APPNAME} --remove
 EOF
   exit 0
