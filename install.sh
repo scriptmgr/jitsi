@@ -133,6 +133,54 @@ __require_root() {
   fi
 }
 
+# Find a free TCP port in [lo, hi]. Snapshots all listening ports once, then
+# tries up to 20 random candidates before falling back to a sequential scan.
+__find_free_port() {
+  local lo="${1:-64000}"
+  local hi="${2:-64999}"
+  local port attempts=0
+  # Extract port numbers from all listening TCP sockets in one pass.
+  # 'ss -ltn' local-address is col 4; split on ':' and take the last field.
+  local _used
+  _used="$(ss -ltn 2>/dev/null | awk 'NR>1 {n=split($4,a,":"); print a[n]}' | sort -un)"
+  while [[ "${attempts}" -lt 20 ]]; do
+    port=$(( lo + RANDOM % (hi - lo + 1) ))
+    if ! printf '%s\n' "${_used}" | grep -qx -- "${port}"; then
+      printf '%d\n' "${port}"
+      return 0
+    fi
+    (( attempts++ )) || true
+  done
+  # Sequential fallback
+  local p
+  for p in $(seq "${lo}" "${hi}"); do
+    if ! printf '%s\n' "${_used}" | grep -qx -- "${p}"; then
+      printf '%d\n' "${p}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Detect the host's internal proxy IP.
+# Priority: docker0 bridge address (172.17.0.1 by default) → any 172.17.x.x →
+# any RFC-1918 172.16-31 address.
+# The result is the address nginx uses in proxy_pass to reach the prosody container.
+__detect_proxy_ip() {
+  local ip
+  # docker0 is the standard Docker bridge; its host-side address (typically 172.17.0.1)
+  # is reachable from all containers on the default bridge network.
+  ip="$(ip -4 addr show docker0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')"
+  [[ -n "${ip}" ]] && printf '%s\n' "${ip}" && return 0
+  # Broader 172.17.x.x scan for custom bridge networks
+  ip="$(ip -4 addr show 2>/dev/null | awk '/inet 172\.17\./ {split($2,a,"/"); print a[1]; exit}')"
+  [[ -n "${ip}" ]] && printf '%s\n' "${ip}" && return 0
+  # Any RFC-1918 172.16-31 address as last resort
+  ip="$(ip -4 addr show 2>/dev/null | awk '/inet 172\.(1[6-9]|2[0-9]|3[01])\./ {split($2,a,"/"); print a[1]; exit}')"
+  [[ -n "${ip}" ]] && printf '%s\n' "${ip}" && return 0
+  return 1
+}
+
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # Configuration
 # - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -180,8 +228,15 @@ __init_config() {
   fi
   TZ="${TZ:-${HOST_TZ}}"
 
+  # Internal proxy IP — the address prosody's port is bound to so that the
+  # nginx reverse proxy (and other containers on the same network) can reach it.
+  # Defaults to the host's 172.17.x.x address; override when using a different network.
+  INTERNAL_PROXY_IP="${INTERNAL_PROXY_IP:-$(__detect_proxy_ip 2>/dev/null || true)}"
+  [[ -z "${INTERNAL_PROXY_IP}" ]] && __warn "Could not detect internal proxy IP — set INTERNAL_PROXY_IP manually."
+
   # Core server settings
-  HTTP_PORT="${HTTP_PORT:-64453}"
+  # Auto-select a free port in 64000-64999 if not already configured.
+  HTTP_PORT="${HTTP_PORT:-$(__find_free_port 64000 64999 2>/dev/null || printf '64453')}"
   ENABLE_AUTH="${ENABLE_AUTH:-0}"
   AUTH_TYPE="${AUTH_TYPE:-internal}"
   ADMIN_USER="${ADMIN_USER:-administrator}"
@@ -241,10 +296,14 @@ __init_config() {
   NGINX_VHOST_DIR="${NGINX_VHOST_DIR:-/etc/nginx/vhosts.d}"
   NGINX_VHOST_FILE="${NGINX_VHOST_DIR}/${PUBLIC_DOMAIN}.conf"
   WRITE_NGINX_VHOST="${WRITE_NGINX_VHOST:-1}"
-  # SSL cert directory — defaults to the standard letsencrypt path for PUBLIC_DOMAIN.
-  # Override when PUBLIC_DOMAIN is a subdomain (e.g. meet.example.com) and the cert
-  # lives under the parent domain or a wildcard name (e.g. /etc/letsencrypt/live/example.com).
-  NGINX_SSL_CERT_DIR="${NGINX_SSL_CERT_DIR:-/etc/letsencrypt/live/${PUBLIC_DOMAIN}}"
+  # SSL cert directory — matches the literal 'domain' placeholder in the nginx
+  # template at /usr/local/share/CasjaysDev/scripts/templates/nginx/reverseproxy.conf.
+  # The sed substitution in __write_nginx_vhost replaces that path with this value;
+  # when using the default it is a no-op (path stays as-is).
+  # Override when the cert lives elsewhere, e.g.:
+  #   NGINX_SSL_CERT_DIR=/etc/letsencrypt/live/meet.example.com
+  #   NGINX_SSL_CERT_DIR=/etc/letsencrypt/live/example.com  (wildcard covers subdomain)
+  NGINX_SSL_CERT_DIR="${NGINX_SSL_CERT_DIR:-/etc/letsencrypt/live/domain}"
 
   # Watermark/branding overlay settings
   SHOW_JITSI_WATERMARK="${SHOW_JITSI_WATERMARK:-false}"
@@ -254,7 +313,7 @@ __init_config() {
 
   # JVB colibri WebSocket — required for reliable audio/video behind a reverse proxy.
   # Prosody's internal nginx routes /colibri-ws/ to JVB:9090 over the Docker network.
-  # JVB port 9090 is bound to 127.0.0.1 only (loopback) for local debugging if needed.
+  # JVB port 9090 is not exposed; all colibri-WS traffic flows through prosody.
   JVB_WS_DOMAIN="${JVB_WS_DOMAIN:-${PUBLIC_DOMAIN}}"
   JVB_WS_SERVER_ID="${JVB_WS_SERVER_ID:-default-jvb}"
   COLIBRI_WEBSOCKET_PORT="${COLIBRI_WEBSOCKET_PORT:-443}"
@@ -397,6 +456,7 @@ __gen_env_file() {
 JITSI_DATA_DIR=${JITSI_DATA_DIR}
 JITSI_CONFIG_DIR=${JITSI_CONFIG_DIR}
 HTTP_PORT=${HTTP_PORT}
+INTERNAL_PROXY_IP=${INTERNAL_PROXY_IP}
 HTTPS_PORT=0
 ENABLE_HTTP_REDIRECT=0
 ENABLE_LETSENCRYPT=0
@@ -487,8 +547,10 @@ ENABLE_SUBDOMAIN_ROOMS=${ENABLE_SUBDOMAIN_ROOMS}
 
 # nginx vhost generation
 # Set WRITE_NGINX_VHOST=0 to skip writing the vhost file
-# Set NGINX_SSL_CERT_DIR when the cert lives under a different name, e.g.:
-#   /etc/letsencrypt/live/example.com  (wildcard *.example.com covers meet.example.com)
+# NGINX_SSL_CERT_DIR defaults to /etc/letsencrypt/live/domain (literal 'domain' —
+# matches the nginx template placeholder). Override when the cert is elsewhere, e.g.:
+#   NGINX_SSL_CERT_DIR=/etc/letsencrypt/live/meet.example.com
+#   NGINX_SSL_CERT_DIR=/etc/letsencrypt/live/example.com
 NGINX_VHOST_DIR=${NGINX_VHOST_DIR}
 WRITE_NGINX_VHOST=${WRITE_NGINX_VHOST}
 NGINX_SSL_CERT_DIR=${NGINX_SSL_CERT_DIR}
@@ -498,6 +560,7 @@ EOF
 __ensure_all_env_keys() {
   __ensure_env_key JITSI_DATA_DIR "${JITSI_DATA_DIR}"
   __ensure_env_key JITSI_CONFIG_DIR "${JITSI_CONFIG_DIR}"
+  __ensure_env_key INTERNAL_PROXY_IP "${INTERNAL_PROXY_IP}"
   __ensure_env_key SMTP_SERVER "${SMTP_SERVER_DEFAULT}"
   __ensure_env_key SMTP_PORT "${SMTP_PORT_DEFAULT}"
   __ensure_env_key SMTP_FROM "no-reply@${PUBLIC_DOMAIN}"
@@ -594,12 +657,12 @@ services:
     restart: unless-stopped
     pull_policy: always
     ports:
-      # Port 80: the internal web server (reverse proxy) entry point.
-      # The external frontend proxy creates a vhost pointing to http://{host}:80;
-      # prosody's internal server routes web, BOSH, XMPP-WS, and colibri-WS to
-      # the correct backend containers over the 'meet' Docker network.
-      # Bind to 127.0.0.1 — external proxy is on the same host.
-      - "127.0.0.1:80:80"
+      # Prosody's internal web server (reverse proxy) entry point.
+      # Bound to INTERNAL_PROXY_IP:HTTP_PORT so the nginx frontend proxy and
+      # other containers on the same network can reach it; not 127.0.0.1 which
+      # would be invisible to containers even on the host network.
+      # prosody routes web, BOSH, XMPP-WS, and colibri-WS internally.
+      - "${INTERNAL_PROXY_IP}:${HTTP_PORT}:80"
       # Ports 5222/5347/5280 are internal XMPP protocol ports — NOT exposed.
       # All inter-service XMPP flows over the 'meet' Docker network.
     volumes:
@@ -865,7 +928,7 @@ __write_nginx_vhost() {
       -e "s| REPLACE_NGINX_VHOSTS||g" \
       -e "s|REPLACE_NGINX_PORT|443|g" \
       -e "s|REPLACE_SERVER_LISTEN_OPTS|ssl|g" \
-      -e "s|REPLACE_HOST_PROXY|http://127.0.0.1:80|g" \
+      -e "s|REPLACE_HOST_PROXY|http://${INTERNAL_PROXY_IP}:${HTTP_PORT}|g" \
       -e "s|/etc/letsencrypt/live/domain/|${NGINX_SSL_CERT_DIR}/|g" \
       -e 's|\$connection_upgrade|"upgrade"|g' \
       "${_template}" > "${NGINX_VHOST_FILE}"
@@ -886,7 +949,7 @@ server {
 
   location / {
     proxy_http_version            1.1;
-    proxy_pass                    http://127.0.0.1:80;
+    proxy_pass                    http://${INTERNAL_PROXY_IP}:${HTTP_PORT};
     proxy_buffering               off;
     proxy_request_buffering       off;
     proxy_set_header              Host              \$host;
@@ -926,7 +989,7 @@ server {
 
   location / {
     proxy_http_version            1.1;
-    proxy_pass                    http://127.0.0.1:80;
+    proxy_pass                    http://${INTERNAL_PROXY_IP}:${HTTP_PORT};
     proxy_buffering               off;
     proxy_request_buffering       off;
     proxy_set_header              Host              ${PUBLIC_DOMAIN};
