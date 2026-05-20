@@ -727,7 +727,7 @@ __fill_missing_secrets() {
   fi
 
   if [[ -z "${ADMIN_PASS:-}" ]]; then
-    if [[ -f "${CREDS_FILE}" ]] && grep -q -- "^ADMIN_USER=${ADMIN_USER}$" "${CREDS_FILE}"; then
+    if [[ -f "${CREDS_FILE}" ]] && grep -q -- "^ADMIN_USER=${ADMIN_USER}@" "${CREDS_FILE}"; then
       ADMIN_PASS="$(grep -m1 -- '^ADMIN_PASS=' "${CREDS_FILE}" | sed 's/^ADMIN_PASS=//')"
     else
       ADMIN_PASS="$(__randpass)"
@@ -995,7 +995,7 @@ __register_admin_user() {
 
   umask 077
   cat > "${CREDS_FILE}" <<EOF
-ADMIN_USER=${ADMIN_USER}
+ADMIN_USER=${ADMIN_USER}@${PUBLIC_DOMAIN}
 ADMIN_PASS=${ADMIN_PASS}
 UPDATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 EOF
@@ -1130,7 +1130,7 @@ Jitsi Meet Installation Complete
 ============================================================
 Public URL:      ${PUBLIC_URL}
 Auth Enabled:    ${ENABLE_AUTH} (0=open, 1=required)
-Admin User:      ${ADMIN_USER}
+Admin User:      ${ADMIN_USER}@${PUBLIC_DOMAIN}
 Credentials:     ${CREDS_FILE}
 Jibri:           ${ENABLE_JIBRI:-0}
 Subdomain Rooms: ${ENABLE_SUBDOMAIN_ROOMS} (*.${PUBLIC_DOMAIN} -> room redirect)
