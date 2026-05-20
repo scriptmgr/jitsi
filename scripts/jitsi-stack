@@ -23,12 +23,6 @@
 
 APPNAME="${0##*/}"
 VERSION="YYYYMMDDHHMM-git"
-RUN_USER="${USER:-$(id -un)}"
-SET_UID="${UID:-$(id -u)}"
-SCRIPT_SRC_DIR="${BASH_SOURCE[0]%/*}"
-
-# Suppress shellcheck unused warnings on standard boilerplate
-export RUN_USER SET_UID SCRIPT_SRC_DIR
 
 set -euo pipefail
 
@@ -67,9 +61,8 @@ __is_ip4_public() {
   local ip="${1:-}"
   [[ -z "$ip" ]] && return 1
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-  local a b c d
-  IFS='.' read -r a b c d <<< "$ip"
-  : "${d}"  # d is parsed for completeness but only a/b/c are tested
+  local a b c
+  IFS='.' read -r a b c _ <<< "$ip"
   (( a == 0 )) && return 1
   (( a == 10 )) && return 1
   (( a == 127 )) && return 1
