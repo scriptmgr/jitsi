@@ -91,11 +91,16 @@ __download_all_scripts_from_github() {
   mkdir -p "$dest" || return 1
 
   while :; do
-    response="$(curl -q -LSs "${api_base}?per_page=100&page=${page}")" || return 1
+    response="$(curl -q -LSs --max-time 15 "${api_base}?per_page=100&page=${page}")" || return 1
+    # Validate JSON shape: GitHub returns an object (e.g. {"message":"rate limit"})
+    # on errors rather than the expected array of contents — bail out cleanly.
+    if ! printf '%s' "$response" | jq -e 'type=="array"' >/dev/null 2>&1; then
+      return 1
+    fi
     mapfile -t files < <(printf '%s' "$response" | jq -r '.[] | select(.type=="file") | .name')
     [[ ${#files[@]} -eq 0 ]] && break
     for file in "${files[@]}"; do
-      curl -q -LSs "${raw_base}/${file}" -o "${dest}/${file}" || return 1
+      curl -q -LSs --max-time 30 "${raw_base}/${file}" -o "${dest}/${file}" || return 1
       chmod 755 "${dest}/${file}"
     done
     (( ${#files[@]} < 100 )) && break
@@ -164,12 +169,13 @@ __find_free_port() {
 
 # Scan /etc/letsencrypt/live for a cert directory that covers the given domain.
 # Search order:
-#   1. Exact domain name          (meet.example.com)
-#   2. Exact name + numeric suffix (meet.example.com-0001)
-#   3. Parent domain              (example.com — wildcard *.example.com)
-#   4. Parent + numeric suffix    (example.com-0001)
-#   5. openssl SAN scan of every cert (catches non-obvious names)
-#   6. Returns 1 — caller falls back to /etc/letsencrypt/live/domain
+#   1. /etc/letsencrypt/live/domain (literal default — present on all managed hosts)
+#   2. Exact domain name          (meet.example.com)
+#   3. Exact name + numeric suffix (meet.example.com-0001)
+#   4. Parent domain              (example.com — wildcard *.example.com)
+#   5. Parent + numeric suffix    (example.com-0001)
+#   6. openssl SAN scan of every cert (catches non-obvious names)
+#   7. Returns 1 — caller supplies its own fallback
 __find_ssl_cert_dir() {
   local domain="${1:-${PUBLIC_DOMAIN}}"
   local live="/etc/letsencrypt/live"
@@ -178,13 +184,16 @@ __find_ssl_cert_dir() {
 
   [[ -d "${live}" ]] || return 1
 
-  # 1 & 2 — exact domain, with/without numeric suffix
+  # 1 — literal 'domain' directory (the standard cert location on managed hosts)
+  [[ -f "${live}/domain/fullchain.pem" ]] && { printf '%s\n' "${live}/domain"; return 0; }
+
+  # 2 & 3 — exact domain name, with/without numeric suffix
   [[ -f "${live}/${domain}/fullchain.pem" ]] && { printf '%s\n' "${live}/${domain}"; return 0; }
   for d in "${live}/${domain}"-[0-9]*/; do
     [[ -f "${d}fullchain.pem" ]] && { printf '%s\n' "${d%/}"; return 0; }
   done
 
-  # 3 & 4 — parent domain (covers wildcard *.parent certs), skip if no subdomain
+  # 4 & 5 — parent domain (covers wildcard *.parent certs), skip if no subdomain
   if [[ "${parent}" != "${domain}" ]]; then
     [[ -f "${live}/${parent}/fullchain.pem" ]] && { printf '%s\n' "${live}/${parent}"; return 0; }
     for d in "${live}/${parent}"-[0-9]*/; do
@@ -192,7 +201,7 @@ __find_ssl_cert_dir() {
     done
   fi
 
-  # 5 — openssl SAN scan: each DNS: token ends at a comma or whitespace
+  # 6 — openssl SAN scan: each DNS: token ends at a comma or whitespace
   __need_cmd openssl || return 1
   for d in "${live}"/*/; do
     [[ -f "${d}fullchain.pem" ]] || continue
@@ -269,8 +278,12 @@ __init_config() {
   [[ -f /etc/timezone ]] && read -r HOST_TZ < /etc/timezone
   if [[ -L /etc/localtime ]]; then
     local _rl
-    _rl="$(readlink /etc/localtime)"
-    HOST_TZ="${_rl##*/zoneinfo/}"
+    _rl="$(readlink -f /etc/localtime 2>/dev/null || readlink /etc/localtime)"
+    # Only accept the readlink result when it actually points into a zoneinfo dir,
+    # otherwise we would assign a garbage TZ like '/etc/localtime' on some hosts.
+    case "${_rl}" in
+      */zoneinfo/*) HOST_TZ="${_rl##*/zoneinfo/}" ;;
+    esac
   fi
   TZ="${TZ:-${HOST_TZ}}"
 
@@ -367,12 +380,19 @@ __init_config() {
   ENABLE_XMPP_WEBSOCKET="${ENABLE_XMPP_WEBSOCKET:-1}"
 }
 
-# Load existing .env file and export variables to environment
+# Load existing .env file and export variables to environment.
+# Strips one layer of surrounding single or double quotes so values written as
+# KEY="value with spaces" do not export with literal quote characters.
 __load_existing_env() {
   [[ -f "${ENV_FILE}" ]] || return 0
   local key value
   while IFS='=' read -r key value; do
     case "${key}" in \#*|"") continue ;; esac
+    # Strip a matching pair of surrounding quotes (single or double)
+    case "${value}" in
+      \"*\") value="${value#\"}"; value="${value%\"}" ;;
+      \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
     export "${key}=${value}" 2>/dev/null || true
   done < "${ENV_FILE}"
 }
@@ -605,6 +625,15 @@ EOF
 __ensure_all_env_keys() {
   __ensure_env_key JITSI_DATA_DIR "${JITSI_DATA_DIR}"
   __ensure_env_key JITSI_CONFIG_DIR "${JITSI_CONFIG_DIR}"
+  __ensure_env_key HTTP_PORT "${HTTP_PORT}"
+  __ensure_env_key PUBLIC_URL "${PUBLIC_URL}"
+  __ensure_env_key PUBLIC_DOMAIN "${PUBLIC_DOMAIN}"
+  __ensure_env_key TZ "${TZ}"
+  __ensure_env_key ENABLE_AUTH "${ENABLE_AUTH}"
+  __ensure_env_key JICOFO_AUTH_PASSWORD "${JICOFO_AUTH_PASSWORD}"
+  __ensure_env_key JVB_AUTH_PASSWORD "${JVB_AUTH_PASSWORD}"
+  __ensure_env_key JIBRI_RECORDER_PASSWORD ""
+  __ensure_env_key JIBRI_XMPP_PASSWORD ""
   __ensure_env_key INTERNAL_PROXY_IP "${INTERNAL_PROXY_IP}"
   __ensure_env_key SMTP_SERVER "${SMTP_SERVER_DEFAULT}"
   __ensure_env_key SMTP_PORT "${SMTP_PORT_DEFAULT}"
@@ -662,21 +691,39 @@ __fill_missing_secrets() {
   . "${ENV_FILE}"
   local changed=0
 
-  # __sed_inplace: portable in-place sed (BSD sed requires a backup extension)
-  __sed_inplace() { sed -i.bak "$1" "$2" && rm -f "$2.bak"; }
+  # Set a key in ENV_FILE to a value: replace in place if present, otherwise append.
+  # Portable across GNU/BSD sed (BSD requires a backup extension).
+  __set_env_key() {
+    local key="$1" val="$2"
+    if grep -qE -- "^${key}=" "${ENV_FILE}" 2>/dev/null; then
+      # Escape replacement for sed: backslash, ampersand, and the delimiter (|)
+      local _esc="${val//\\/\\\\}"
+      _esc="${_esc//&/\\&}"
+      _esc="${_esc//|/\\|}"
+      sed -i.bak "s|^${key}=.*|${key}=${_esc}|" "${ENV_FILE}" && rm -f "${ENV_FILE}.bak"
+    else
+      printf '%s=%s\n' "${key}" "${val}" >> "${ENV_FILE}"
+    fi
+  }
 
   if [[ -z "${JICOFO_AUTH_PASSWORD:-}" ]]; then
-    __sed_inplace "s/^JICOFO_AUTH_PASSWORD=.*/JICOFO_AUTH_PASSWORD=$(__randpass)/" "${ENV_FILE}"
+    __set_env_key JICOFO_AUTH_PASSWORD "$(__randpass)"
     changed=1
   fi
   if [[ -z "${JVB_AUTH_PASSWORD:-}" ]]; then
-    __sed_inplace "s/^JVB_AUTH_PASSWORD=.*/JVB_AUTH_PASSWORD=$(__randpass)/" "${ENV_FILE}"
+    __set_env_key JVB_AUTH_PASSWORD "$(__randpass)"
     changed=1
   fi
 
   if [[ "${ENABLE_JIBRI:-0}" == "1" ]]; then
-    [[ -z "${JIBRI_RECORDER_PASSWORD:-}" ]] && __sed_inplace "s/^JIBRI_RECORDER_PASSWORD=.*/JIBRI_RECORDER_PASSWORD=$(__randpass)/" "${ENV_FILE}" && changed=1
-    [[ -z "${JIBRI_XMPP_PASSWORD:-}" ]] && __sed_inplace "s/^JIBRI_XMPP_PASSWORD=.*/JIBRI_XMPP_PASSWORD=$(__randpass)/" "${ENV_FILE}" && changed=1
+    if [[ -z "${JIBRI_RECORDER_PASSWORD:-}" ]]; then
+      __set_env_key JIBRI_RECORDER_PASSWORD "$(__randpass)"
+      changed=1
+    fi
+    if [[ -z "${JIBRI_XMPP_PASSWORD:-}" ]]; then
+      __set_env_key JIBRI_XMPP_PASSWORD "$(__randpass)"
+      changed=1
+    fi
   fi
 
   if [[ -z "${ADMIN_PASS:-}" ]]; then
@@ -929,6 +976,12 @@ __wait_for_prosody() {
 __register_admin_user() {
   # shellcheck source=/dev/null
   . "${ENV_FILE}"
+  # Skip when auth is disabled: prosody has no internal_hashed store configured
+  # and the register call would fail noisily without serving any purpose.
+  if [[ "${ENABLE_AUTH:-0}" != "1" ]]; then
+    __info "ENABLE_AUTH=0 — skipping admin user registration."
+    return 0
+  fi
   # Admin accounts must be registered on auth.meet.jitsi, not meet.jitsi.
   # meet.jitsi uses jitsi-anonymous authentication and has no password storage.
   # auth.meet.jitsi uses internal_hashed and is the correct credentials domain.
@@ -1120,12 +1173,27 @@ Environment Variables:
   ENABLE_AUTH             0=open, 1=auth required (default: 0)
   ADMIN_USER              Admin username (default: administrator)
   ADMIN_PASS              Admin password (default: generated)
-  APP_NAME                Application name
+  APP_NAME                Application name (default: 'CasjaysDev Meet')
+  PROVIDER_NAME           Provider name (default: CasjaysDev)
   ENABLE_JIBRI            Enable recording (default: 0)
   ENABLE_SUBDOMAIN_ROOMS  1=redirect <room>.domain -> domain/<room> (default: 1)
                           Requires a wildcard SSL cert on the frontend proxy.
   DOCKER_HOST_ADDRESS     Public IP for JVB ICE (auto-detected if not set)
   GITHUB_RAW_REPO         GitHub repo for scripts (default: scriptmgr/jitsi)
+  JITSI_BASE_DIR          Installation directory (default: /opt/jitsi)
+  JITSI_TAG               Jitsi Docker image tag (default: unstable)
+  TZ                      Timezone (default: auto-detected from host)
+  HTTP_PORT               Internal port for prosody (default: random 64000-64999)
+  INTERNAL_PROXY_IP       Bind IP for internal HTTP_PORT (default: docker0 addr)
+  NGINX_VHOST_DIR         nginx vhost directory (default: /etc/nginx/vhosts.d)
+  NGINX_SSL_CERT_DIR      Letsencrypt cert dir (default: auto-detect for PUBLIC_DOMAIN)
+  WRITE_NGINX_VHOST       1=write nginx vhost file, 0=skip (default: 1)
+  SMTP_SERVER             SMTP relay host (default: host.docker.internal)
+  SMTP_PORT               SMTP port (default: 25)
+  SMTP_FROM               From address (default: no-reply@PUBLIC_DOMAIN)
+  IP4_ADDRESS             Override detected public IPv4
+  INSTALL_DEBUG           1=enable set -x trace (same as --debug)
+  NO_COLOR                Disable colored output (same as --no-color)
 
 Examples:
   sudo bash ${APPNAME}
@@ -1143,6 +1211,16 @@ __show_version() {
 
 __do_remove() {
   __require_root "$@"
+  # Safety: never run rm -rf on a short/blank/root-ish path.
+  # JITSI_BASE_DIR must be a real, absolute path at least 5 chars long
+  # and not equal to '/' or any top-level system directory.
+  case "${JITSI_BASE_DIR:-}" in
+    ""|"/"|"/."|"/.."|"/root"|"/home"|"/etc"|"/usr"|"/var"|"/opt"|"/bin"|"/sbin"|"/lib"|"/lib64"|"/boot"|"/dev"|"/proc"|"/sys"|"/run"|"/srv"|"/tmp")
+      __die "Refusing to remove unsafe JITSI_BASE_DIR='${JITSI_BASE_DIR:-}'"
+      ;;
+  esac
+  [[ "${JITSI_BASE_DIR}" = /* ]] || __die "JITSI_BASE_DIR must be an absolute path: '${JITSI_BASE_DIR}'"
+  [[ ${#JITSI_BASE_DIR} -ge 5 ]] || __die "JITSI_BASE_DIR is too short to remove safely: '${JITSI_BASE_DIR}'"
   [[ -d "${JITSI_BASE_DIR}" ]] || __die "Not installed: ${JITSI_BASE_DIR}"
 
   __info "Removing Jitsi..."
@@ -1169,8 +1247,13 @@ __main() {
   __wait_for_prosody
   __register_admin_user
   __write_nginx_vhost
-  __need_cmd jq && __download_all_scripts_from_github /usr/local/bin \
-    || __warn "jq not found — skipping operational script install. Install jq and re-run to get jitsi-user and jitsi-stack."
+  if __need_cmd jq; then
+    if ! __download_all_scripts_from_github /usr/local/bin; then
+      __warn "Failed to download operational scripts from GitHub — re-run install.sh once network access is restored."
+    fi
+  else
+    __warn "jq not found — skipping operational script install. Install jq and re-run to get jitsi-user and jitsi-stack."
+  fi
   __post_summary
 }
 
