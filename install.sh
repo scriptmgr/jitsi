@@ -162,6 +162,52 @@ __find_free_port() {
   return 1
 }
 
+# Scan /etc/letsencrypt/live for a cert directory that covers the given domain.
+# Search order:
+#   1. Exact domain name          (meet.example.com)
+#   2. Exact name + numeric suffix (meet.example.com-0001)
+#   3. Parent domain              (example.com — wildcard *.example.com)
+#   4. Parent + numeric suffix    (example.com-0001)
+#   5. openssl SAN scan of every cert (catches non-obvious names)
+#   6. Returns 1 — caller falls back to /etc/letsencrypt/live/domain
+__find_ssl_cert_dir() {
+  local domain="${1:-${PUBLIC_DOMAIN}}"
+  local live="/etc/letsencrypt/live"
+  local parent="${domain#*.}"   # meet.example.com → example.com
+  local d _sans
+
+  [[ -d "${live}" ]] || return 1
+
+  # 1 & 2 — exact domain, with/without numeric suffix
+  [[ -f "${live}/${domain}/fullchain.pem" ]] && { printf '%s\n' "${live}/${domain}"; return 0; }
+  for d in "${live}/${domain}"-[0-9]*/; do
+    [[ -f "${d}fullchain.pem" ]] && { printf '%s\n' "${d%/}"; return 0; }
+  done
+
+  # 3 & 4 — parent domain (covers wildcard *.parent certs), skip if no subdomain
+  if [[ "${parent}" != "${domain}" ]]; then
+    [[ -f "${live}/${parent}/fullchain.pem" ]] && { printf '%s\n' "${live}/${parent}"; return 0; }
+    for d in "${live}/${parent}"-[0-9]*/; do
+      [[ -f "${d}fullchain.pem" ]] && { printf '%s\n' "${d%/}"; return 0; }
+    done
+  fi
+
+  # 5 — openssl SAN scan: each DNS: token ends at a comma or whitespace
+  __need_cmd openssl || return 1
+  for d in "${live}"/*/; do
+    [[ -f "${d}fullchain.pem" ]] || continue
+    _sans="$(openssl x509 -noout -text -in "${d}fullchain.pem" 2>/dev/null \
+              | grep -oE 'DNS:[^, ]+')"
+    printf '%s\n' "${_sans}" | grep -qxF -- "DNS:${domain}" \
+      && { printf '%s\n' "${d%/}"; return 0; }
+    [[ "${parent}" != "${domain}" ]] \
+      && printf '%s\n' "${_sans}" | grep -qxF -- "DNS:*.${parent}" \
+      && { printf '%s\n' "${d%/}"; return 0; }
+  done
+
+  return 1
+}
+
 # Detect the host's internal proxy IP.
 # Priority: docker0 bridge address (172.17.0.1 by default) → any 172.17.x.x →
 # any RFC-1918 172.16-31 address.
@@ -296,14 +342,13 @@ __init_config() {
   NGINX_VHOST_DIR="${NGINX_VHOST_DIR:-/etc/nginx/vhosts.d}"
   NGINX_VHOST_FILE="${NGINX_VHOST_DIR}/${PUBLIC_DOMAIN}.conf"
   WRITE_NGINX_VHOST="${WRITE_NGINX_VHOST:-1}"
-  # SSL cert directory — matches the literal 'domain' placeholder in the nginx
-  # template at /usr/local/share/CasjaysDev/scripts/templates/nginx/reverseproxy.conf.
-  # The sed substitution in __write_nginx_vhost replaces that path with this value;
-  # when using the default it is a no-op (path stays as-is).
-  # Override when the cert lives elsewhere, e.g.:
+  # SSL cert directory — auto-detected by scanning /etc/letsencrypt/live for a
+  # cert that covers PUBLIC_DOMAIN (exact, parent wildcard, or SAN match).
+  # Falls back to /etc/letsencrypt/live/domain (the literal template placeholder,
+  # which is also a real cert directory on this host).
+  # Override at any time:
   #   NGINX_SSL_CERT_DIR=/etc/letsencrypt/live/meet.example.com
-  #   NGINX_SSL_CERT_DIR=/etc/letsencrypt/live/example.com  (wildcard covers subdomain)
-  NGINX_SSL_CERT_DIR="${NGINX_SSL_CERT_DIR:-/etc/letsencrypt/live/domain}"
+  NGINX_SSL_CERT_DIR="${NGINX_SSL_CERT_DIR:-$(__find_ssl_cert_dir "${PUBLIC_DOMAIN}" 2>/dev/null || printf '/etc/letsencrypt/live/domain')}"
 
   # Watermark/branding overlay settings
   SHOW_JITSI_WATERMARK="${SHOW_JITSI_WATERMARK:-false}"
