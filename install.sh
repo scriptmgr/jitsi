@@ -156,6 +156,7 @@ __init_config() {
   PUBLIC_URL="${PUBLIC_URL:-http://${_host}}"
   # Public IP for JVB ICE candidate mapping — critical for NAT/Docker deployments
   DOCKER_HOST_ADDRESS="${DOCKER_HOST_ADDRESS:-$(__get_hosts_ip4_address 2>/dev/null || true)}"
+  [[ -z "${DOCKER_HOST_ADDRESS}" ]] && __warn "Could not detect public IPv4 — set DOCKER_HOST_ADDRESS manually or JVB ICE will be broken."
   # Strip trailing slash — a common paste error that breaks BOSH/WebSocket URLs
   PUBLIC_URL="${PUBLIC_URL%/}"
   # Validate scheme — must be http:// or https://
@@ -239,6 +240,16 @@ __init_config() {
   JITSI_WATERMARK_LINK="${JITSI_WATERMARK_LINK:-}"
   SHOW_BRAND_WATERMARK="${SHOW_BRAND_WATERMARK:-false}"
   BRAND_WATERMARK_LINK="${BRAND_WATERMARK_LINK:-}"
+
+  # JVB colibri WebSocket — required for reliable audio/video behind a reverse proxy.
+  # Prosody's internal nginx routes /colibri-ws/ to JVB:9090 over the Docker network.
+  # JVB port 9090 is bound to 127.0.0.1 only (loopback) for local debugging if needed.
+  JVB_WS_DOMAIN="${JVB_WS_DOMAIN:-${PUBLIC_DOMAIN}}"
+  JVB_WS_SERVER_ID="${JVB_WS_SERVER_ID:-default-jvb}"
+  COLIBRI_WEBSOCKET_PORT="${COLIBRI_WEBSOCKET_PORT:-443}"
+
+  # XMPP WebSocket — required for reliable XMPP signalling behind a reverse proxy
+  ENABLE_XMPP_WEBSOCKET="${ENABLE_XMPP_WEBSOCKET:-1}"
 }
 
 # Load existing .env file and export variables to environment
@@ -398,6 +409,14 @@ JVB_UDP_PORT=10000
 JVB_TCP_HARVESTER_DISABLED=true
 DOCKER_HOST_ADDRESS=${DOCKER_HOST_ADDRESS}
 
+# JVB colibri WebSocket — routed internally by prosody's web server to jvb:9090
+JVB_WS_DOMAIN=${JVB_WS_DOMAIN}
+JVB_WS_SERVER_ID=${JVB_WS_SERVER_ID}
+COLIBRI_WEBSOCKET_PORT=${COLIBRI_WEBSOCKET_PORT}
+
+# XMPP WebSocket — routed internally by prosody's web server
+ENABLE_XMPP_WEBSOCKET=${ENABLE_XMPP_WEBSOCKET}
+
 # SMTP
 SMTP_SERVER=${SMTP_SERVER:-${SMTP_SERVER_DEFAULT}}
 SMTP_PORT=${SMTP_PORT:-${SMTP_PORT_DEFAULT}}
@@ -470,6 +489,10 @@ __ensure_all_env_keys() {
   __ensure_env_key JVB_UDP_PORT "10000"
   __ensure_env_key JVB_TCP_HARVESTER_DISABLED "true"
   __ensure_env_key DOCKER_HOST_ADDRESS "${DOCKER_HOST_ADDRESS}"
+  __ensure_env_key JVB_WS_DOMAIN "${JVB_WS_DOMAIN}"
+  __ensure_env_key JVB_WS_SERVER_ID "${JVB_WS_SERVER_ID}"
+  __ensure_env_key COLIBRI_WEBSOCKET_PORT "${COLIBRI_WEBSOCKET_PORT}"
+  __ensure_env_key ENABLE_XMPP_WEBSOCKET "${ENABLE_XMPP_WEBSOCKET}"
   __ensure_env_key APP_NAME "${APP_NAME}"
   __ensure_env_key NATIVE_APP_NAME "${NATIVE_APP_NAME}"
   __ensure_env_key PROVIDER_NAME "${PROVIDER_NAME}"
@@ -543,9 +566,14 @@ services:
     restart: unless-stopped
     pull_policy: always
     ports:
-      - "5222:5222"
-      - "5347:5347"
-      - "5280:5280"
+      # Port 80: the internal web server (reverse proxy) entry point.
+      # The external frontend proxy creates a vhost pointing to http://{host}:80;
+      # prosody's internal server routes web, BOSH, XMPP-WS, and colibri-WS to
+      # the correct backend containers over the 'meet' Docker network.
+      # Bind to 127.0.0.1 — external proxy is on the same host.
+      - "127.0.0.1:80:80"
+      # Ports 5222/5347/5280 are internal XMPP protocol ports — NOT exposed.
+      # All inter-service XMPP flows over the 'meet' Docker network.
     volumes:
       - $JITSI_CONFIG_DIR/prosody:/config:Z
     environment:
@@ -601,7 +629,10 @@ services:
     pull_policy: always
     depends_on: [prosody]
     ports:
+      # UDP 10000: JVB media (audio/video RTP/RTCP) — must be open in the firewall
       - "10000:10000/udp"
+      # Port 9090 (colibri WebSocket) is NOT exposed — prosody's internal
+      # web server proxies /colibri-ws/ to jvb:9090 over the 'meet' Docker network.
     volumes:
       - $JITSI_CONFIG_DIR/jvb:/config:Z
     environment:
@@ -612,6 +643,8 @@ services:
       - JVB_UDP_PORT=${JVB_UDP_PORT}
       - JVB_TCP_HARVESTER_DISABLED=${JVB_TCP_HARVESTER_DISABLED}
       - DOCKER_HOST_ADDRESS=${DOCKER_HOST_ADDRESS}
+      - JVB_WS_DOMAIN=${JVB_WS_DOMAIN}
+      - JVB_WS_SERVER_ID=${JVB_WS_SERVER_ID}
     networks: [meet]
 
   web:
@@ -620,8 +653,8 @@ services:
     restart: unless-stopped
     pull_policy: always
     depends_on: [prosody, jicofo]
-    ports:
-      - "${HTTP_PORT:-64453}:80"
+    # No host port binding — prosody's internal web server routes to this
+    # container over the 'meet' Docker network (web:80).
     volumes:
       - $JITSI_DATA_DIR/web:/config:Z
     environment:
@@ -632,6 +665,12 @@ services:
       - XMPP_AUTH_DOMAIN=auth.meet.jitsi
       - XMPP_GUEST_DOMAIN=guest.meet.jitsi
       - XMPP_SERVER=xmpp.meet.jitsi
+      # BOSH and WebSocket endpoints — required for signalling behind a reverse proxy
+      - XMPP_BOSH_URL_BASE=http://xmpp.meet.jitsi:5280
+      - ENABLE_XMPP_WEBSOCKET=${ENABLE_XMPP_WEBSOCKET}
+      # Colibri WebSocket — clients connect to wss://<domain>/colibri-ws/...
+      - JVB_WS_DOMAIN=${JVB_WS_DOMAIN}
+      - COLIBRI_WEBSOCKET_PORT=${COLIBRI_WEBSOCKET_PORT}
       - ENABLE_AUTH=${ENABLE_AUTH}
       - ENABLE_GUESTS=${ENABLE_GUESTS}
       - SMTP_SERVER=${SMTP_SERVER}
@@ -783,16 +822,63 @@ __post_summary() {
 Jitsi Meet Installation Complete
 ============================================================
 Public URL:      ${PUBLIC_URL}
-HTTP Port:       ${HTTP_PORT}
 Auth Enabled:    ${ENABLE_AUTH} (0=open, 1=required)
 Admin User:      ${ADMIN_USER}
 Credentials:     ${CREDS_FILE}
 Jibri:           ${ENABLE_JIBRI:-0}
 ------------------------------------------------------------
-Reverse proxy should forward to: http://127.0.0.1:${HTTP_PORT}
 Operational scripts installed to: /usr/local/bin
   jitsi-user   — manage user accounts
   jitsi-stack  — start/stop/restart/status/logs/update/backup
+------------------------------------------------------------
+
+REVERSE PROXY SETUP
+===================
+Prosody's internal web server (port 80) handles ALL Jitsi routing:
+  web app, /http-bind (BOSH), /xmpp-websocket, /colibri-ws/ (JVB)
+
+On your frontend server, create one vhost per domain and point it to:
+  http://127.0.0.1:80  (if prosody is on the same host)
+  http://{prosody_ip}:80  (if prosody is on a separate host)
+
+Works for any domain pattern:
+  ${PUBLIC_DOMAIN}, *.meet.example.com, teams.internal.lan, etc.
+
+Example nginx vhost (add SSL/cert config for your provider):
+
+    server {
+        listen 443 ssl;
+        server_name ${PUBLIC_DOMAIN};
+
+        # Security headers — set here so they apply regardless of backend
+        add_header X-Frame-Options SAMEORIGIN always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header Referrer-Policy no-referrer always;
+
+        location / {
+            proxy_pass         http://127.0.0.1:80;
+            proxy_http_version 1.1;
+
+            # WebSocket upgrade — required for XMPP-WS and colibri-WS
+            proxy_set_header Upgrade    \$http_upgrade;
+            proxy_set_header Connection "upgrade";
+
+            # Pass real client identity to the internal web server
+            proxy_set_header Host             \$host;
+            proxy_set_header X-Real-IP        \$remote_addr;
+            proxy_set_header X-Forwarded-For  \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+
+            # Long timeouts for persistent WebSocket connections
+            proxy_read_timeout 900s;
+            proxy_send_timeout 900s;
+        }
+    }
+
+FIREWALL: open UDP port 10000 for JVB media (audio/video RTP).
+          If clients are behind restrictive firewalls, add a TURN server.
+      If clients are behind strict firewalls, consider adding a TURN server.
 ------------------------------------------------------------
 EOF
 }
