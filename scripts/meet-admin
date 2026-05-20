@@ -1,0 +1,471 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+##@Version           :  YYYYMMDDHHMM-git
+# @@Author           :  Jason Hempstead
+# @@Contact          :  git-admin@casjaysdev.pro
+# @@License          :  MIT or LICENSE.md
+# @@ReadME           :  meet-admin --help
+# @@Copyright        :  Copyright: (c) 2026 Jason Hempstead, Casjays Developments
+# @@Created          :  Tuesday, May 20, 2026 00:00 EDT
+# @@File             :  meet-admin
+# @@Description      :  Manage Jitsi Meet — users, rooms, tokens, config, logs
+# @@Changelog        :  Renamed from jitsi-user; extended with room/token/config/log
+# @@TODO             :
+# @@Other            :
+# @@Resource         :
+# @@Terminal App     :  yes
+# @@sudo/root        :  no
+# @@Template         :  shell/bash
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# shellcheck disable=SC1001,SC1003,SC2001,SC2003,SC2016,SC2031,SC2090,SC2115,SC2120,SC2155,SC2199,SC2229,SC2317,SC2329
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+
+APPNAME="${0##*/}"
+VERSION="YYYYMMDDHHMM-git"
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Configuration
+# Internal vars use MEETADMIN_* prefix.
+# User-facing override env var: MEETUSER_ACCOUNT_DOMAIN (overrides PUBLIC_DOMAIN from .env)
+# ---------------------------------------------------------------------------
+
+MEETADMIN_BASE_DIR="${JITSI_BASE_DIR:-/opt/jitsi}"
+MEETADMIN_ENV_FILE="${MEETADMIN_BASE_DIR}/.env"
+MEETADMIN_PROSODY_CTR="jitsi-prosody"
+MEETADMIN_JICOFO_CTR="jitsi-jicofo"
+MEETADMIN_AUTH_DOMAIN="auth.meet.jitsi"
+MEETADMIN_ACCOUNT_DOMAIN="${MEETUSER_ACCOUNT_DOMAIN:-}"
+MEETADMIN_JWT_SECRET=""
+MEETADMIN_JWT_APP_ID="jitsi"
+MEETADMIN_ENABLE_JWT="0"
+MEETADMIN_COMPOSE_CMD=""
+MEETADMIN_DEBUG="${MEETADMIN_DEBUG:-0}"
+
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
+
+__die()      { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+__info()     { printf 'INFO:  %s\n' "$*"; }
+__warn()     { printf 'WARN:  %s\n' "$*" >&2; }
+__need_cmd() { command -v "$1" &>/dev/null; }
+
+__load_env() {
+  [[ -f "${MEETADMIN_ENV_FILE}" ]] || return 0
+  local key value line
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    value="${line#*=}"
+    # Strip surrounding quotes
+    value="${value%\"}"
+    value="${value#\"}"
+    value="${value%\'}"
+    value="${value#\'}"
+    case "${key}" in
+      \#*|"") continue ;;
+      PUBLIC_DOMAIN)
+        # env var MEETUSER_ACCOUNT_DOMAIN takes priority over .env
+        [[ -z "${MEETADMIN_ACCOUNT_DOMAIN}" ]] && MEETADMIN_ACCOUNT_DOMAIN="${value}" ;;
+      JWT_APP_SECRET) MEETADMIN_JWT_SECRET="${value}" ;;
+      JWT_APP_ID)     MEETADMIN_JWT_APP_ID="${value}" ;;
+      ENABLE_JWT)     MEETADMIN_ENABLE_JWT="${value}" ;;
+    esac
+  done < "${MEETADMIN_ENV_FILE}"
+}
+
+__compose_cmd() {
+  if [[ -n "${MEETADMIN_COMPOSE_CMD}" ]]; then
+    printf '%s' "${MEETADMIN_COMPOSE_CMD}"
+    return
+  fi
+  if docker compose version &>/dev/null 2>&1; then
+    MEETADMIN_COMPOSE_CMD="docker compose"
+  elif __need_cmd docker-compose; then
+    MEETADMIN_COMPOSE_CMD="docker-compose"
+  else
+    __die "Neither 'docker compose' nor 'docker-compose' found."
+  fi
+  printf '%s' "${MEETADMIN_COMPOSE_CMD}"
+}
+
+__require_stack() {
+  __need_cmd docker || __die "docker is not installed or not in PATH."
+  [[ -f "${MEETADMIN_BASE_DIR}/docker-compose.yml" ]] \
+    || __die "Jitsi not installed at ${MEETADMIN_BASE_DIR}. Run install.sh first."
+}
+
+__read_password() {
+  local prompt="${1:-Password}"
+  local pw
+  if [[ -t 0 ]]; then
+    printf '%s: ' "${prompt}" >&2
+    stty -echo
+    read -r pw
+    stty echo
+    printf '\n' >&2
+  else
+    __die "stdin is not a terminal — cannot prompt for password."
+  fi
+  [[ -n "${pw}" ]] || __die "Password cannot be empty."
+  printf '%s' "${pw}"
+}
+
+# ---------------------------------------------------------------------------
+# Help / version
+# ---------------------------------------------------------------------------
+
+__help() {
+  cat <<EOF
+${APPNAME} v${VERSION} — Jitsi Meet administration
+
+Usage: ${APPNAME} [OPTIONS] <group> <subcommand> [args...]
+
+Groups and subcommands:
+  user   add  <username> [password]   Add a registered user
+         del  <username>              Delete a user
+         pass <username>              Change a user's password
+         list                         List all registered users
+
+  room   list                         List active conferences
+         kick <room> <participant>    Kick a participant from a room
+
+  token  generate <username>          Generate a JWT access token
+           [--room <room>]            Limit to a specific room (default: *)
+           [--moderator]              Grant moderator role
+           [--ttl <seconds>]          Token lifetime in seconds (default: 3600)
+
+  config show                         Show current configuration (secrets masked)
+         set  <KEY> <VALUE>           Update a configuration key in .env
+
+  log    [service]                    Tail logs; omit service to tail all
+           services: prosody jvb jicofo web jibri
+
+Options:
+  -h, --help       Show this help
+  -v, --version    Show version
+  --debug          Enable trace output (set -x)
+  --no-color       Disable color output
+
+Environment:
+  JITSI_BASE_DIR          Installation directory (default: /opt/jitsi)
+  MEETUSER_ACCOUNT_DOMAIN Display domain appended to usernames (overrides PUBLIC_DOMAIN from .env)
+  MEETADMIN_DEBUG         Enable debug trace when set to 1
+
+Examples:
+  ${APPNAME} user add alice
+  ${APPNAME} user add alice s3cret
+  ${APPNAME} user list
+  ${APPNAME} room list
+  ${APPNAME} room kick myroom alice@meet.jitsi
+  ${APPNAME} token generate alice --room myroom --moderator --ttl 7200
+  ${APPNAME} config show
+  ${APPNAME} config set ENABLE_AUTH 1
+  ${APPNAME} log prosody
+  ${APPNAME} log
+EOF
+}
+
+__version() {
+  printf '%s\n' "${APPNAME} v${VERSION}"
+}
+
+# ---------------------------------------------------------------------------
+# user subcommands
+# ---------------------------------------------------------------------------
+
+__user_add() {
+  local username="${1:-}"
+  local password="${2:-}"
+  [[ -n "${username}" ]] || __die "Usage: ${APPNAME} user add <username> [password]"
+  username="${username%%@*}"
+  [[ -z "${password}" ]] && password="$(__read_password "Password for ${username}")"
+  docker exec "${MEETADMIN_PROSODY_CTR}" \
+    prosodyctl --config /config/prosody.cfg.lua register \
+    "${username}" "${MEETADMIN_AUTH_DOMAIN}" "${password}" 2>/dev/null \
+    && __info "User '${username}' created." \
+    || __die "Failed to create user '${username}'."
+}
+
+__user_del() {
+  local username="${1:-}"
+  [[ -n "${username}" ]] || __die "Usage: ${APPNAME} user del <username>"
+  username="${username%%@*}"
+  # prosodyctl deluser requires mod_admin_shell which is not enabled in the
+  # casjaysdevdocker/prosody image. The flat-file backend stores each account as
+  # <auth-domain>/accounts/<username>.dat so direct removal is equivalent.
+  local dat_dir
+  dat_dir="/config/data/${MEETADMIN_AUTH_DOMAIN//./%2e}/accounts"
+  docker exec "${MEETADMIN_PROSODY_CTR}" \
+    rm -f "${dat_dir}/${username}.dat" 2>/dev/null \
+    && __info "User '${username}' deleted." \
+    || __die "Failed to delete user '${username}'."
+}
+
+__user_pass() {
+  local username="${1:-}"
+  [[ -n "${username}" ]] || __die "Usage: ${APPNAME} user pass <username>"
+  username="${username%%@*}"
+  local password
+  password="$(__read_password "New password for ${username}")"
+  docker exec "${MEETADMIN_PROSODY_CTR}" \
+    prosodyctl --config /config/prosody.cfg.lua passwd \
+    "${username}" "${MEETADMIN_AUTH_DOMAIN}" "${password}" 2>/dev/null \
+    && __info "Password updated for '${username}'." \
+    || __die "Failed to update password for '${username}'."
+}
+
+__user_list() {
+  local dat_dir suffix
+  dat_dir="/config/data/${MEETADMIN_AUTH_DOMAIN//./%2e}/accounts"
+  suffix="${MEETADMIN_ACCOUNT_DOMAIN:+@${MEETADMIN_ACCOUNT_DOMAIN}}"
+  __info "Registered users (auth domain: ${MEETADMIN_AUTH_DOMAIN})${suffix:+, shown as *${suffix}}:"
+  docker exec "${MEETADMIN_PROSODY_CTR}" \
+    ls "${dat_dir}" 2>/dev/null \
+    | sed "s/\\.dat\$/${suffix}/" \
+    || printf '(no users found)\n'
+}
+
+__cmd_user() {
+  local sub="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "${sub}" in
+    add)                  __user_add "$@" ;;
+    del|delete|rm)        __user_del "$@" ;;
+    pass|passwd|password) __user_pass "$@" ;;
+    list|ls)              __user_list ;;
+    "") __die "Usage: ${APPNAME} user <add|del|pass|list>" ;;
+    *)  __die "Unknown user subcommand '${sub}'. Use: add, del, pass, list" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# room subcommands
+# ---------------------------------------------------------------------------
+
+__jicofo_api() {
+  local path="${1}"
+  local method="${2:-GET}"
+  docker exec "${MEETADMIN_JICOFO_CTR}" \
+    curl -q -LSs --max-time 5 -X "${method}" \
+    "http://localhost:8888${path}" 2>/dev/null \
+    || __die "Could not reach jicofo REST API at :8888${path}. Is the stack running and does the jicofo container have curl?"
+}
+
+__room_list() {
+  local out
+  out="$(__jicofo_api /colibri/conferences)"
+  if __need_cmd jq; then
+    local count
+    count="$(printf '%s' "${out}" | jq '.conferences | length')"
+    __info "Active conferences: ${count}"
+    if [[ "${count}" -gt 0 ]]; then
+      printf '%s' "${out}" | jq -r '.conferences[] | "\(.id)\t\(.name // "(unnamed)")"'
+    fi
+  else
+    printf '%s\n' "${out}"
+  fi
+}
+
+__room_kick() {
+  local room="${1:-}"
+  local participant="${2:-}"
+  [[ -n "${room}" ]]        || __die "Usage: ${APPNAME} room kick <room> <participant-jid>"
+  [[ -n "${participant}" ]] || __die "Usage: ${APPNAME} room kick <room> <participant-jid>"
+  __need_cmd jq || __die "jq is required for 'room kick'"
+
+  local out conf_id
+  out="$(__jicofo_api /colibri/conferences)"
+  conf_id="$(printf '%s' "${out}" \
+    | jq -r --arg r "${room}" \
+      '.conferences[]? | select((.name // "") | ascii_downcase == ($r | ascii_downcase)) | .id' \
+    | head -1)"
+  [[ -n "${conf_id}" ]] || __die "No active conference named '${room}' found."
+
+  __jicofo_api "/colibri/conferences/${conf_id}/participants/${participant}/kick" POST \
+    && __info "Kicked '${participant}' from '${room}'." \
+    || __die "Failed to kick participant — jicofo may not support REST kick in this version."
+}
+
+__cmd_room() {
+  local sub="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "${sub}" in
+    list|ls) __room_list ;;
+    kick)    __room_kick "$@" ;;
+    "") __die "Usage: ${APPNAME} room <list|kick>" ;;
+    *)  __die "Unknown room subcommand '${sub}'. Use: list, kick" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# token subcommands
+# ---------------------------------------------------------------------------
+
+__b64url() { base64 -w0 | tr '+/' '-_' | tr -d '='; }
+
+__token_generate() {
+  local username="${1:-}"
+  [[ -n "${username}" ]] || __die "Usage: ${APPNAME} token generate <username> [--room <room>] [--moderator] [--ttl <seconds>]"
+  [[ "${MEETADMIN_ENABLE_JWT}" == "1" ]] \
+    || __die "JWT is not enabled (ENABLE_JWT=1 required in .env)."
+  [[ -n "${MEETADMIN_JWT_SECRET}" ]] \
+    || __die "JWT_APP_SECRET is not set in .env."
+
+  username="${username%%@*}"
+  [[ $# -gt 0 ]] && shift
+
+  local room="*" moderator="false" ttl=3600
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --room)      room="${2:?--room requires a value}"; shift 2 ;;
+      --moderator) moderator="true"; shift ;;
+      --ttl)       ttl="${2:?--ttl requires a value}"; shift 2 ;;
+      *)           __die "Unknown token option: $1" ;;
+    esac
+  done
+
+  __need_cmd openssl || __die "openssl is required for JWT generation."
+
+  local domain now exp hdr pld sig
+  domain="${MEETADMIN_ACCOUNT_DOMAIN:-${MEETADMIN_AUTH_DOMAIN}}"
+  now="$(date +%s)"
+  exp="$((now + ttl))"
+
+  hdr="$(printf '{"alg":"HS256","typ":"JWT"}' | __b64url)"
+  pld="$(printf '{"context":{"user":{"name":"%s","email":"%s@%s"},"features":{"moderator":%s}},"aud":"jitsi","iss":"%s","sub":"%s","room":"%s","exp":%d}' \
+    "${username}" "${username}" "${domain}" "${moderator}" \
+    "${MEETADMIN_JWT_APP_ID}" "${domain}" "${room}" "${exp}" | __b64url)"
+  sig="$(printf '%s.%s' "${hdr}" "${pld}" \
+    | openssl dgst -sha256 -hmac "${MEETADMIN_JWT_SECRET}" -binary | __b64url)"
+
+  printf '%s.%s.%s\n' "${hdr}" "${pld}" "${sig}"
+}
+
+__cmd_token() {
+  local sub="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "${sub}" in
+    generate|gen) __token_generate "$@" ;;
+    "") __die "Usage: ${APPNAME} token <generate>" ;;
+    *)  __die "Unknown token subcommand '${sub}'. Use: generate" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# config subcommands
+# ---------------------------------------------------------------------------
+
+__config_show() {
+  [[ -f "${MEETADMIN_ENV_FILE}" ]] || __die "No .env found at ${MEETADMIN_ENV_FILE}"
+  local key line
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    case "${key}" in
+      \#*|"") printf '%s\n' "${line}" ;;
+      *PASSWORD*|*SECRET*|*PASS*|*TOKEN*|*KEY*)
+        printf '%s=xxxxx\n' "${key}" ;;
+      *) printf '%s\n' "${line}" ;;
+    esac
+  done < "${MEETADMIN_ENV_FILE}"
+}
+
+__config_set() {
+  local key="${1:-}"
+  local value="${2:-}"
+  [[ -n "${key}" ]]   || __die "Usage: ${APPNAME} config set <KEY> <VALUE>"
+  [[ -n "${value}" ]] || __die "Usage: ${APPNAME} config set <KEY> <VALUE>"
+  [[ -f "${MEETADMIN_ENV_FILE}" ]] || __die "No .env found at ${MEETADMIN_ENV_FILE}"
+  # Escape value for use as sed replacement (handles &, \, |)
+  local escaped
+  escaped="$(printf '%s\n' "${value}" | sed 's/[&\\|]/\\&/g')"
+  if grep -q "^${key}=" "${MEETADMIN_ENV_FILE}"; then
+    sed -i "s|^${key}=.*|${key}=${escaped}|" "${MEETADMIN_ENV_FILE}"
+    __info "Updated ${key}."
+  else
+    printf '%s=%s\n' "${key}" "${value}" >> "${MEETADMIN_ENV_FILE}"
+    __info "Added ${key}."
+  fi
+}
+
+__cmd_config() {
+  local sub="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "${sub}" in
+    show) __config_show ;;
+    set)  __config_set "$@" ;;
+    "") __die "Usage: ${APPNAME} config <show|set>" ;;
+    *)  __die "Unknown config subcommand '${sub}'. Use: show, set" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# log subcommand
+# ---------------------------------------------------------------------------
+
+__cmd_log() {
+  local service="${1:-}"
+  local compose
+  compose="$(__compose_cmd)"
+
+  if [[ -n "${service}" ]]; then
+    case "${service}" in
+      prosody|jvb|jicofo|web|jibri) ;;
+      *) __die "Unknown service '${service}'. Valid: prosody, jvb, jicofo, web, jibri" ;;
+    esac
+    __info "Tailing logs for: ${service} (Ctrl-C to stop)"
+    (cd "${MEETADMIN_BASE_DIR}" && ${compose} logs -f "${service}")
+  else
+    __info "Tailing all service logs (Ctrl-C to stop)"
+    (cd "${MEETADMIN_BASE_DIR}" && ${compose} logs -f)
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+__main() {
+  __require_stack
+
+  local group="${1:-}"
+  [[ $# -gt 0 ]] && shift
+
+  case "${group}" in
+    user)   __cmd_user   "$@" ;;
+    room)   __cmd_room   "$@" ;;
+    token)  __cmd_token  "$@" ;;
+    config) __cmd_config "$@" ;;
+    log)    __cmd_log    "$@" ;;
+    "")     __help; exit 1 ;;
+    *)      __die "Unknown group '${group}'. Use: user, room, token, config, log" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+getopt -T &>/dev/null; [[ $? -ne 4 ]] && __die "GNU getopt is required (brew install gnu-getopt on macOS)"
+_OPTS="$(getopt -o hv -l help,version,debug,no-color -n "${APPNAME}" -- "$@")" \
+  || { __help; exit 1; }
+eval set -- "${_OPTS}"
+while true; do
+  case "$1" in
+    -h|--help)    __help; exit 0 ;;
+    -v|--version) __version; exit 0 ;;
+    --debug)      MEETADMIN_DEBUG=1; shift ;;
+    --no-color)   export NO_COLOR=1; shift ;;
+    --)           shift; break ;;
+    *)            break ;;
+  esac
+done
+
+[[ "${MEETADMIN_DEBUG}" == "1" ]] && set -x
+
+__load_env
+__main "$@"
+
+# ex: ts=2 sw=2 et filetype=sh

@@ -1137,7 +1137,7 @@ Subdomain Rooms: ${ENABLE_SUBDOMAIN_ROOMS} (*.${PUBLIC_DOMAIN} -> room redirect)
 NGINX_VHOST_DIR: ${NGINX_VHOST_DIR}
 ------------------------------------------------------------
 Operational scripts installed to: /usr/local/bin
-  jitsi-user   — manage user accounts
+  meet-admin   — manage users, rooms, tokens, config, and logs
   jitsi-stack  — start/stop/restart/status/logs/update/backup
 ------------------------------------------------------------
 
@@ -1252,7 +1252,7 @@ __main() {
       __warn "Failed to download operational scripts from GitHub — re-run install.sh once network access is restored."
     fi
   else
-    __warn "jq not found — skipping operational script install. Install jq and re-run to get jitsi-user and jitsi-stack."
+    __warn "jq not found — skipping operational script install. Install jq and re-run to get meet-admin and jitsi-stack."
   fi
   __post_summary
 }
