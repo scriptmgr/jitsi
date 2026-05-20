@@ -897,19 +897,52 @@ EOF
 
   if [[ "${ENABLE_SUBDOMAIN_ROOMS:-1}" == "1" ]]; then
     cat <<EOF
-    # Wildcard subdomain → room redirect
-    # <room>.${PUBLIC_DOMAIN}  ──>  https://${PUBLIC_DOMAIN}/<room>
-    # Requires a *.${PUBLIC_DOMAIN} wildcard SSL cert on this server.
+    # Wildcard subdomain → conference room (proxy, NOT redirect)
+    # -------------------------------------------------------
+    # room.${PUBLIC_DOMAIN} serves the Jitsi room inline — no URL change.
+    # Works in web browsers AND native Jitsi apps (iOS/Android/desktop).
+    # A redirect would break native apps by sending them to a different server.
     #
     # Examples:
-    #   myrandomsub.${PUBLIC_DOMAIN}  ->  https://${PUBLIC_DOMAIN}/myrandomsub
-    #   standup.${PUBLIC_DOMAIN}      ->  https://${PUBLIC_DOMAIN}/standup
+    #   standup.${PUBLIC_DOMAIN}     loads ${PUBLIC_DOMAIN}/standup
+    #   teamcall.${PUBLIC_DOMAIN}    loads ${PUBLIC_DOMAIN}/teamcall
+    #
+    # Requires a *.${PUBLIC_DOMAIN} wildcard SSL cert on this server.
     server {
         listen 443 ssl;
         server_name ~^(?P<room>[^.]+)\\.${PUBLIC_DOMAIN//./\\.}\$;
-        # ssl_certificate / ssl_certificate_key — use wildcard cert here
+        # ssl_certificate / ssl_certificate_key — wildcard cert here
 
-        return 301 https://${PUBLIC_DOMAIN}/\$room\$is_args\$args;
+        # Root path: rewrite internally to /{room} on the base domain.
+        # proxy_pass with a URI suffix rewrites the path before forwarding.
+        location = / {
+            proxy_pass         http://127.0.0.1:80/\$room;
+            proxy_http_version 1.1;
+            proxy_set_header   Upgrade    \$http_upgrade;
+            proxy_set_header   Connection "upgrade";
+            # Use base domain as Host so prosody serves the right config
+            proxy_set_header   Host              ${PUBLIC_DOMAIN};
+            proxy_set_header   X-Real-IP         \$remote_addr;
+            proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto https;
+            proxy_read_timeout 900s;
+            proxy_send_timeout 900s;
+        }
+
+        # All other paths (static assets, config.js, BOSH, WS, colibri-WS)
+        # pass through unchanged so the room page and app connections work.
+        location / {
+            proxy_pass         http://127.0.0.1:80;
+            proxy_http_version 1.1;
+            proxy_set_header   Upgrade    \$http_upgrade;
+            proxy_set_header   Connection "upgrade";
+            proxy_set_header   Host              ${PUBLIC_DOMAIN};
+            proxy_set_header   X-Real-IP         \$remote_addr;
+            proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto https;
+            proxy_read_timeout 900s;
+            proxy_send_timeout 900s;
+        }
     }
 
 EOF
