@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-##@Version           :  YYYYMMDDHHMM-git
+##@Version           :  202610111040-git
 # @@Author           :  Jason Hempstead
 # @@Contact          :  git-admin@casjaysdev.pro
 # @@License          :  MIT or LICENSE.md
@@ -22,7 +22,7 @@
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 
 APPNAME="${0##*/}"
-VERSION="YYYYMMDDHHMM-git"
+VERSION="202610111040-git"
 
 set -euo pipefail
 
@@ -249,7 +249,7 @@ __jicofo_api() {
   local path="${1}"
   local method="${2:-GET}"
   docker exec "${MEETADMIN_JICOFO_CTR}" \
-    curl -q -LSs --max-time 5 -X "${method}" \
+    curl -q -fLSs --max-time 5 -X "${method}" \
     "http://localhost:8888${path}" 2>/dev/null \
     || __die "Could not reach jicofo REST API at :8888${path}. Is the stack running and does the jicofo container have curl?"
 }
@@ -276,7 +276,7 @@ __room_kick() {
   [[ -n "${participant}" ]] || __die "Usage: ${APPNAME} room kick <room> <participant-jid>"
   __need_cmd jq || __die "jq is required for 'room kick'"
 
-  local out conf_id
+  local out conf_id conf_path participant_path
   out="$(__jicofo_api /colibri/conferences)"
   conf_id="$(printf '%s' "${out}" \
     | jq -r --arg r "${room}" \
@@ -284,7 +284,9 @@ __room_kick() {
     | head -1)"
   [[ -n "${conf_id}" ]] || __die "No active conference named '${room}' found."
 
-  __jicofo_api "/colibri/conferences/${conf_id}/participants/${participant}/kick" POST \
+  conf_path="$(jq -rn --arg value "${conf_id}" '$value | @uri')"
+  participant_path="$(jq -rn --arg value "${participant}" '$value | @uri')"
+  __jicofo_api "/colibri/conferences/${conf_path}/participants/${participant_path}/kick" POST \
     && __info "Kicked '${participant}' from '${room}'." \
     || __die "Failed to kick participant — jicofo may not support REST kick in this version."
 }
@@ -313,6 +315,7 @@ __token_generate() {
     || __die "JWT is not enabled (ENABLE_JWT=1 required in .env)."
   [[ -n "${MEETADMIN_JWT_SECRET}" ]] \
     || __die "JWT_APP_SECRET is not set in .env."
+  __need_cmd jq || __die "jq is required for safe JWT generation."
 
   username="${username%%@*}"
   [[ $# -gt 0 ]] && shift
@@ -327,6 +330,11 @@ __token_generate() {
     esac
   done
 
+  [[ "${ttl}" =~ ^[1-9][0-9]*$ && ${#ttl} -le 10 ]] \
+    || __die "Token TTL must be a positive integer no greater than 2147483647."
+  (( ttl <= 2147483647 )) \
+    || __die "Token TTL must be a positive integer no greater than 2147483647."
+
   __need_cmd openssl || __die "openssl is required for JWT generation."
 
   local domain now exp hdr pld sig
@@ -335,9 +343,15 @@ __token_generate() {
   exp="$((now + ttl))"
 
   hdr="$(printf '{"alg":"HS256","typ":"JWT"}' | __b64url)"
-  pld="$(printf '{"context":{"user":{"name":"%s","email":"%s@%s"},"features":{"moderator":%s}},"aud":"jitsi","iss":"%s","sub":"%s","room":"%s","exp":%d}' \
-    "${username}" "${username}" "${domain}" "${moderator}" \
-    "${MEETADMIN_JWT_APP_ID}" "${domain}" "${room}" "${exp}" | __b64url)"
+  pld="$(jq -cn \
+    --arg username "${username}" \
+    --arg domain "${domain}" \
+    --arg app_id "${MEETADMIN_JWT_APP_ID}" \
+    --arg room "${room}" \
+    --argjson moderator "${moderator}" \
+    --argjson exp "${exp}" \
+    '{context:{user:{name:$username,email:($username + "@" + $domain)},features:{moderator:$moderator}},aud:"jitsi",iss:$app_id,sub:$domain,room:$room,exp:$exp}' \
+    | __b64url)"
   sig="$(printf '%s.%s' "${hdr}" "${pld}" \
     | openssl dgst -sha256 -hmac "${MEETADMIN_JWT_SECRET}" -binary | __b64url)"
 
@@ -377,6 +391,8 @@ __config_set() {
   local value="${2:-}"
   [[ -n "${key}" ]]   || __die "Usage: ${APPNAME} config set <KEY> <VALUE>"
   [[ -n "${value}" ]] || __die "Usage: ${APPNAME} config set <KEY> <VALUE>"
+  [[ "${key}" =~ ^[A-Z][A-Z0-9_]*$ ]] || __die "Configuration keys must use uppercase letters, numbers, and underscores."
+  [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* ]] || __die "Configuration values must fit on one line."
   [[ -f "${MEETADMIN_ENV_FILE}" ]] || __die "No .env found at ${MEETADMIN_ENV_FILE}"
   # Escape value for use as sed replacement (handles &, \, |)
   local escaped
@@ -448,8 +464,11 @@ __main() {
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-getopt -T &>/dev/null; [[ $? -ne 4 ]] && __die "GNU getopt is required (brew install gnu-getopt on macOS)"
-_OPTS="$(getopt -o hv -l help,version,debug,no-color -n "${APPNAME}" -- "$@")" \
+__getopt_rc=0
+getopt -T &>/dev/null || __getopt_rc=$?
+(( __getopt_rc == 4 )) || __die "GNU getopt is required (brew install gnu-getopt on macOS)"
+unset __getopt_rc
+_OPTS="$(getopt -o +hv -l help,version,debug,no-color -n "${APPNAME}" -- "$@")" \
   || { __help; exit 1; }
 eval set -- "${_OPTS}"
 while true; do

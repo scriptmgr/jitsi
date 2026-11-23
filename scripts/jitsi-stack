@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-##@Version           :  YYYYMMDDHHMM-git
+##@Version           :  202610111158-git
 # @@Author           :  Jason Hempstead
 # @@Contact          :  git-admin@casjaysdev.pro
 # @@License          :  MIT or LICENSE.md
@@ -22,7 +22,7 @@
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 
 APPNAME="${0##*/}"
-VERSION="YYYYMMDDHHMM-git"
+VERSION="202610111158-git"
 
 set -euo pipefail
 
@@ -85,7 +85,7 @@ __get_hosts_ip4_address() {
   fi
   local ip url
   for url in "https://ifcfg.us/ip" "https://ifconfig.co/ip" "https://checkip.amazonaws.com"; do
-    ip="$(curl -4 -q -LSs --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
+    ip="$(curl -4 -q -fLSs --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
     if [[ -n "$ip" ]] && __is_ip4_public "$ip"; then
       printf '%s\n' "$ip"
       return 0
@@ -115,7 +115,7 @@ __get_hosts_ip6_address() {
   fi
   local ip url
   for url in "https://ifcfg.us/ip" "https://ifconfig.co/ip" "https://api6.ipify.org"; do
-    ip="$(curl -6 -q -LSs --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
+    ip="$(curl -6 -q -fLSs --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
     if [[ -n "$ip" ]] && __is_ip6_public "$ip"; then
       printf '%s\n' "$ip"
       return 0
@@ -284,7 +284,7 @@ __stack_status() {
   [[ -n "${bind}" ]]             && printf 'Bind Address:    %s\n' "${bind}"
   [[ -n "${enable_auth}" ]]      && printf 'Auth Required:   %s\n' "${enable_auth}"
   [[ -n "${enable_subdomain}" ]] && printf 'Subdomain Rooms: %s\n' "${enable_subdomain}"
-  printf '------------------------------------------------------------\n'
+  printf '%s\n' '------------------------------------------------------------'
   if [[ -f "${JITSISTACK_COMPOSE_FILE}" ]]; then
     __docker_compose ps
   else
@@ -322,9 +322,6 @@ __stack_backup() {
   ( umask 077 && : > "${archive}" ) || __die "Cannot create backup file: ${archive}"
 
   tar_log="$(mktemp -t "jitsi-stack-backup-XXXXXX.log")"
-  # Always remove the log on exit from this function
-  trap 'rm -f "${tar_log}"' RETURN
-
   __info "Creating backup: ${archive}"
   # Exclude the backup dir itself (avoid recursion) and transient runtime state.
   # tar exit code 1 = "some files changed during read" — acceptable on a live stack.
@@ -347,8 +344,10 @@ __stack_backup() {
   else
     __warn "tar exited with status ${rc}"
     [[ -s "${tar_log}" ]] && sed 's/^/  tar: /' "${tar_log}" >&2
+    rm -f -- "${archive}" "${tar_log}"
     __die "Backup failed: ${archive}"
   fi
+  rm -f -- "${tar_log}"
 }
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -

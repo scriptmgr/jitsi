@@ -1,6 +1,6 @@
 # Reverse Proxy Setup
 
-Prosody's internal web server listens on port 80 bound to `127.0.0.1` on the host. Point any reverse proxy at `http://127.0.0.1:80` — it routes everything internally: the Jitsi web app, `/http-bind` (BOSH), `/xmpp-websocket`, and `/colibri-ws/` (JVB colibri WebSocket).
+The web container listens on port 80. The installer publishes **web:80** on the host address and port stored in `$JITSI_BASE_DIR/.env` (default `/opt/jitsi/.env`) as `INTERNAL_PROXY_IP` and `HTTP_PORT`. `HTTP_PORT` defaults to a free host port in `64000–64999`. Replace the placeholders with the values from `.env`, then point the reverse proxy at `http://<INTERNAL_PROXY_IP>:<HTTP_PORT>`. This published endpoint is the web frontend, which routes Jitsi pages and signalling requests to the internal services; it is not a Prosody port.
 
 **Critical requirements for all proxies:**
 
@@ -8,7 +8,9 @@ Prosody's internal web server listens on port 80 bound to `127.0.0.1` on the hos
 - `X-Forwarded-Proto: https` must be set (Jitsi generates mixed-content URLs without it)
 - Read/send timeouts must be at least 900 s (WebSocket connections are long-lived)
 
-`install.sh` writes an nginx vhost automatically when nginx is present. Set `WRITE_NGINX_VHOST=0` to skip it.
+When `WRITE_NGINX_VHOST=1` (the default) and the `nginx` command is installed, `install.sh` writes `$NGINX_VHOST_DIR/$PUBLIC_DOMAIN.conf` (default `/etc/nginx/vhosts.d/$PUBLIC_DOMAIN.conf`). It runs `nginx -t`; if the configuration passes, it reloads active Nginx or enables and starts the service if inactive. If the test fails, it warns and leaves the service unchanged. If Nginx is absent or `WRITE_NGINX_VHOST=0`, no vhost is written. The generated file expects `fullchain.pem` and `privkey.pem` beneath `NGINX_SSL_CERT_DIR`; set that variable to the directory containing your valid certificates. Set `WRITE_NGINX_VHOST=0` if you manage the proxy configuration separately.
+
+`JITSI_BASE_DIR` must be an absolute, non-symlink path and cannot be a protected top-level system/root directory. `HTTP_PORT` must be `1–65535`; the `ENABLE_AUTH`, `ENABLE_JIBRI`, and `WRITE_NGINX_VHOST` switches accept only `0` or `1`. A supplied `INTERNAL_PROXY_IP` must be IPv4. `PUBLIC_URL` must be an HTTP(S) URL with a valid host, and its host must match `PUBLIC_DOMAIN`.
 
 ---
 
@@ -32,17 +34,19 @@ Prosody's internal web server listens on port 80 bound to `127.0.0.1` on the hos
 Client (TLS)
     │
     ▼
-Frontend Proxy  (443 → http://127.0.0.1:80)
+Frontend Proxy  (443 → http://<INTERNAL_PROXY_IP>:<HTTP_PORT>)
     │
     ▼
-prosody:80  (internal web server — routes by path)
+web:80  (published host address and port — routes requests internally)
     ├── /               → web:80          (Jitsi web app)
     ├── /http-bind      → prosody:5280    (BOSH signalling)
     ├── /xmpp-websocket → prosody:5280    (XMPP WebSocket)
     └── /colibri-ws/    → jvb:9090        (JVB colibri WebSocket)
 ```
 
-All four backends run inside Docker on the `meet` internal network. Only port 80 is exposed to the host (bound to `127.0.0.1`).
+The four services run inside Docker on the `meet` internal network. The web frontend is published on `INTERNAL_PROXY_IP:HTTP_PORT` and JVB media uses UDP port 10000.
+
+`jitsi-stack backup` creates a timestamped archive of the install tree, including `.env` secrets. `install.sh --remove` removes the stack, Docker images and named volumes, any identifiable installer-generated vhost, and the entire installation directory, including recordings and backups. Preserve anything needed before removal.
 
 ---
 
@@ -53,22 +57,22 @@ When `ENABLE_SUBDOMAIN_ROOMS=1`, `room.yourdomain.com` takes the user directly i
 **Two-step flow:**
 
 1. `room.domain/` — the frontend proxy issues a **same-domain 302** to `/room`. Using the same hostname keeps native-app WebSocket sessions alive; a cross-domain redirect to `domain/room` would change the server and break them.
-2. `room.domain/room` (and all other paths) — the proxy forwards to prosody with `Host: base_domain`. Prosody serves the correct Jitsi config. The edge case where the URL is already `room.domain/room` hits this block directly — no double-room problem.
+2. `room.domain/room` (and all other paths) — the proxy forwards to the web frontend with `Host: base_domain`. The edge case where the URL is already `room.domain/room` hits this block directly — no double-room problem.
 
 **Requires a `*.yourdomain.com` wildcard SSL certificate** on the frontend proxy.
 
 | URL | Behavior |
 |-----|----------|
 | `room.domain/` | 302 → `room.domain/room` (same host) |
-| `room.domain/room` | proxy → prosody → Jitsi room |
-| `room.domain/xmpp-websocket` | proxy → prosody WebSocket |
-| `room.domain/colibri-ws/...` | proxy → prosody → JVB |
+| `room.domain/room` | proxy → web frontend → Jitsi room |
+| `room.domain/xmpp-websocket` | proxy → web frontend → Prosody WebSocket |
+| `room.domain/colibri-ws/...` | proxy → web frontend → JVB |
 
 ---
 
 ## nginx
 
-`install.sh` writes this config to `$NGINX_VHOST_DIR/$PUBLIC_DOMAIN.conf` automatically. The SSL directives are commented out — fill in your certificate paths (or use certbot; see below).
+This is an example of the configuration shape. The installer generates an Nginx vhost at `$NGINX_VHOST_DIR/$PUBLIC_DOMAIN.conf` using the configured host, port, and certificate directory when Nginx is installed and `WRITE_NGINX_VHOST=1`. Ensure the referenced certificate and key exist before enabling the vhost; the example paths below may need adjustment.
 
 ```nginx
 # HTTP → HTTPS redirect
@@ -95,7 +99,7 @@ server {
     add_header Referrer-Policy no-referrer always;
 
     location / {
-        proxy_pass         http://127.0.0.1:80;
+        proxy_pass         http://<INTERNAL_PROXY_IP>:<HTTP_PORT>;
         proxy_http_version 1.1;
         proxy_set_header   Upgrade    $http_upgrade;
         proxy_set_header   Connection "upgrade";
@@ -126,7 +130,7 @@ server {
 
     # Step 2: all other paths → proxy with base domain Host header
     location / {
-        proxy_pass         http://127.0.0.1:80;
+        proxy_pass         http://<INTERNAL_PROXY_IP>:<HTTP_PORT>;
         proxy_http_version 1.1;
         proxy_set_header   Upgrade    $http_upgrade;
         proxy_set_header   Connection "upgrade";
@@ -182,11 +186,11 @@ Requires `mod_proxy`, `mod_proxy_http`, `mod_proxy_wstunnel`, `mod_headers`, and
     RewriteEngine On
     RewriteCond %{HTTP:Upgrade} websocket [NC]
     RewriteCond %{HTTP:Connection} upgrade [NC]
-    RewriteRule ^/?(.*) ws://127.0.0.1:80/$1 [P,L]
+    RewriteRule ^/?(.*) ws://<INTERNAL_PROXY_IP>:<HTTP_PORT>/$1 [P,L]
 
     ProxyPreserveHost On
-    ProxyPass        / http://127.0.0.1:80/
-    ProxyPassReverse / http://127.0.0.1:80/
+    ProxyPass        / http://<INTERNAL_PROXY_IP>:<HTTP_PORT>/
+    ProxyPassReverse / http://<INTERNAL_PROXY_IP>:<HTTP_PORT>/
 
     RequestHeader set X-Forwarded-Proto "https"
     ProxyTimeout 900
@@ -220,12 +224,12 @@ Add a separate VirtualHost with `ServerAlias` and a rewrite rule for the room re
     # WebSocket upgrade
     RewriteCond %{HTTP:Upgrade} websocket [NC]
     RewriteCond %{HTTP:Connection} upgrade [NC]
-    RewriteRule ^/?(.*) ws://127.0.0.1:80/$1 [P,L]
+    RewriteRule ^/?(.*) ws://<INTERNAL_PROXY_IP>:<HTTP_PORT>/$1 [P,L]
 
     # Step 2: proxy everything else with base domain Host header
     ProxyPreserveHost Off
-    ProxyPass        / http://127.0.0.1:80/
-    ProxyPassReverse / http://127.0.0.1:80/
+    ProxyPass        / http://<INTERNAL_PROXY_IP>:<HTTP_PORT>/
+    ProxyPassReverse / http://<INTERNAL_PROXY_IP>:<HTTP_PORT>/
 
     RequestHeader set Host "yourdomain.com"
     RequestHeader set X-Forwarded-Proto "https"
@@ -242,7 +246,7 @@ Caddy handles TLS automatically, including wildcards via DNS challenge (no manua
 ```caddyfile
 # Main Jitsi site
 yourdomain.com {
-    reverse_proxy 127.0.0.1:80
+    reverse_proxy <INTERNAL_PROXY_IP>:<HTTP_PORT>
 
     header {
         X-Frame-Options SAMEORIGIN
@@ -270,7 +274,7 @@ yourdomain.com {
 
     # Step 2: everything else → proxy with base domain Host override
     handle {
-        reverse_proxy 127.0.0.1:80 {
+        reverse_proxy <INTERNAL_PROXY_IP>:<HTTP_PORT> {
             header_up Host yourdomain.com
         }
     }
@@ -326,7 +330,7 @@ frontend jitsi_https
     http-request set-header X-Forwarded-For %[src]
 
 backend jitsi_back
-    server prosody 127.0.0.1:80 check
+    server jitsi-web <INTERNAL_PROXY_IP>:<HTTP_PORT> check
 ```
 
 **Note:** HAProxy terminates TLS at the frontend. The PEM file must contain the full chain + private key concatenated:
@@ -368,11 +372,11 @@ certificatesResolvers:
 ```
 
 ```yaml
-# docker-compose.yml labels for a service that maps to prosody:80 externally
+# docker-compose.yml labels for a service that routes to the published web frontend
 # (or a dedicated Traefik-aware proxy container)
 services:
   jitsi-proxy:
-    image: nginx:alpine          # thin pass-through to 127.0.0.1:80
+    image: nginx:alpine          # thin pass-through to <INTERNAL_PROXY_IP>:<HTTP_PORT>
     labels:
       - "traefik.enable=true"
 

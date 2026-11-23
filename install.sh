@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-##@Version           :  202605190929-git
+##@Version           :  202610191240-git
 # @@Author           :  Jason Hempstead
 # @@Contact          :  git-admin@casjaysdev.pro
 # @@License          :  MIT or LICENSE.md
@@ -9,7 +9,7 @@
 # @@Copyright        :  Copyright: (c) 2026 Jason Hempstead, Casjays Developments
 # @@Created          :  Tuesday, May 19, 2026 09:29 EDT
 # @@File             :  install.sh
-# @@Description      :  POSIX-compliant installer for Jitsi Meet on Docker
+# @@Description      :  Bash installer for Jitsi Meet on Docker
 # @@Changelog        :  Convert to bash; extract operational scripts; use standard utility functions
 # @@TODO             :
 # @@Other            :
@@ -22,7 +22,7 @@
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 
 APPNAME="${0##*/}"
-VERSION="202605190929-git"
+VERSION="202610191240-git"
 
 set -euo pipefail
 
@@ -71,7 +71,7 @@ __get_hosts_ip4_address() {
   fi
   local ip url
   for url in "https://ifcfg.us/ip" "https://ifconfig.co/ip" "https://checkip.amazonaws.com"; do
-    ip="$(curl -4 -q -LSs --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
+    ip="$(curl -4 -q -fLSs --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
     if [[ -n "$ip" ]] && __is_ip4_public "$ip"; then
       printf '%s\n' "$ip"
       return 0
@@ -86,12 +86,12 @@ __download_all_scripts_from_github() {
   local api_base="https://api.github.com/repos/${GITHUB_RAW_REPO}/contents/scripts"
   local raw_base="https://raw.githubusercontent.com/${GITHUB_RAW_REPO}/main/scripts"
   local page=1
-  local files file response
+  local files file response tmp
 
   mkdir -p "$dest" || return 1
 
   while :; do
-    response="$(curl -q -LSs --max-time 15 "${api_base}?per_page=100&page=${page}")" || return 1
+    response="$(curl -q -fLSs --max-time 15 "${api_base}?per_page=100&page=${page}")" || return 1
     # Validate JSON shape: GitHub returns an object (e.g. {"message":"rate limit"})
     # on errors rather than the expected array of contents — bail out cleanly.
     if ! printf '%s' "$response" | jq -e 'type=="array"' >/dev/null 2>&1; then
@@ -100,8 +100,16 @@ __download_all_scripts_from_github() {
     mapfile -t files < <(printf '%s' "$response" | jq -r '.[] | select(.type=="file") | .name')
     [[ ${#files[@]} -eq 0 ]] && break
     for file in "${files[@]}"; do
-      curl -q -LSs --max-time 30 "${raw_base}/${file}" -o "${dest}/${file}" || return 1
-      chmod 755 "${dest}/${file}"
+      [[ "${file}" != */* && "${file}" != "." && "${file}" != ".." ]] || return 1
+      tmp="$(mktemp "${dest}/.${file}.XXXXXX")" || return 1
+      if ! curl -q -fLSs --max-time 30 "${raw_base}/${file}" -o "${tmp}"; then
+        unlink -- "${tmp}"
+        return 1
+      fi
+      if ! chmod 755 "${tmp}" || ! mv -f -- "${tmp}" "${dest}/${file}"; then
+        unlink -- "${tmp}"
+        return 1
+      fi
     done
     (( ${#files[@]} < 100 )) && break
     (( page++ ))
@@ -250,6 +258,10 @@ __init_config() {
   CREDS_FILE="${JITSI_BASE_DIR}/credentials.txt"
   BACKUP_DIR="${JITSI_BASE_DIR}/backup"
 
+  if [[ "${INSTALL_REMOVE_MODE:-0}" == "1" ]]; then
+    return 0
+  fi
+
   # Resolve public URL: use env var or fall back to detected FQDN
   local _host
   _host="$(__determine_hostname_name 2>/dev/null || hostname)"
@@ -386,8 +398,12 @@ __init_config() {
 __load_existing_env() {
   [[ -f "${ENV_FILE}" ]] || return 0
   local key value
-  while IFS='=' read -r key value; do
+  while IFS='=' read -r key value || [[ -n "${key:-}${value:-}" ]]; do
     case "${key}" in \#*|"") continue ;; esac
+    case "${key}" in
+      JITSI_DATA_DIR|JITSI_CONFIG_DIR|HTTP_PORT|INTERNAL_PROXY_IP|PUBLIC_URL|PUBLIC_DOMAIN|TZ|ENABLE_AUTH|AUTH_TYPE|ENABLE_GUESTS|JICOFO_AUTH_USER|JICOFO_AUTH_PASSWORD|JVB_AUTH_USER|JVB_AUTH_PASSWORD|JVB_UDP_PORT|JVB_TCP_HARVESTER_DISABLED|DOCKER_HOST_ADDRESS|JVB_WS_DOMAIN|JVB_WS_SERVER_ID|COLIBRI_WEBSOCKET_PORT|ENABLE_XMPP_WEBSOCKET|SMTP_SERVER|SMTP_PORT|SMTP_FROM|SMTP_USERNAME|SMTP_PASSWORD|SMTP_TLS|SMTP_STARTTLS|JITSI_IMAGE_TAG|APP_NAME|NATIVE_APP_NAME|PROVIDER_NAME|DEFAULT_LANGUAGE|ENABLE_WELCOME_PAGE|ENABLE_PREJOIN_PAGE|ENABLE_LOBBY|ENABLE_CLOSE_PAGE|DISABLE_AUDIO_LEVELS|ENABLE_NOISY_MIC_DETECTION|ENABLE_BREAKOUT_ROOMS|ENABLE_REGISTRATION|ENABLE_JIBRI|JIBRI_RECORDER_USER|JIBRI_RECORDER_PASSWORD|JIBRI_XMPP_USER|JIBRI_XMPP_PASSWORD|ENABLE_RECORDING|ENABLE_LIVESTREAMING|ENABLE_FILE_RECORDING_SERVICE|RESOLUTION|RESOLUTION_MIN|RESOLUTION_WIDTH|RESOLUTION_WIDTH_MIN|SHOW_JITSI_WATERMARK|JITSI_WATERMARK_LINK|SHOW_BRAND_WATERMARK|BRAND_WATERMARK_LINK|ENABLE_SUBDOMAIN_ROOMS|NGINX_VHOST_DIR|WRITE_NGINX_VHOST|NGINX_SSL_CERT_DIR) ;;
+      *) continue ;;
+    esac
     # Strip a matching pair of surrounding quotes (single or double)
     case "${value}" in
       \"*\") value="${value#\"}"; value="${value%\"}" ;;
@@ -395,6 +411,61 @@ __load_existing_env() {
     esac
     export "${key}=${value}" 2>/dev/null || true
   done < "${ENV_FILE}"
+  NGINX_VHOST_FILE="${NGINX_VHOST_DIR}/${PUBLIC_DOMAIN}.conf"
+}
+
+__is_valid_ipv4() {
+  local ip="${1:-}" octet
+  local -a octets
+  [[ "${ip}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  IFS='.' read -r -a octets <<< "${ip}"
+  for octet in "${octets[@]}"; do
+    (( 10#${octet} <= 255 )) || return 1
+  done
+}
+
+__validate_runtime_config() {
+  local authority host url_port
+  case "${JITSI_BASE_DIR}" in
+    ""|"/"|"/opt"|"/var"|"/etc"|"/usr"|"/bin"|"/sbin"|"/lib"|"/lib64"|"/boot"|"/dev"|"/proc"|"/sys"|"/run"|"/srv"|"/tmp"|"/root"|"/home")
+      __die "Refusing unsafe JITSI_BASE_DIR='${JITSI_BASE_DIR}'"
+      ;;
+  esac
+  [[ "${JITSI_BASE_DIR}" == /* ]] || __die "JITSI_BASE_DIR must be an absolute path: '${JITSI_BASE_DIR}'"
+  [[ ${#JITSI_BASE_DIR} -ge 5 ]] || __die "JITSI_BASE_DIR is too short: '${JITSI_BASE_DIR}'"
+  [[ ! -L "${JITSI_BASE_DIR}" ]] || __die "Refusing to use a symlink installation directory: ${JITSI_BASE_DIR}"
+
+  [[ "${HTTP_PORT}" =~ ^[0-9]{1,5}$ ]] \
+    || __die "HTTP_PORT must be a number from 1 to 65535 (got: '${HTTP_PORT}')"
+  (( 10#${HTTP_PORT} >= 1 && 10#${HTTP_PORT} <= 65535 )) \
+    || __die "HTTP_PORT must be a number from 1 to 65535 (got: '${HTTP_PORT}')"
+  [[ "${ENABLE_AUTH}" == 0 || "${ENABLE_AUTH}" == 1 ]] \
+    || __die "ENABLE_AUTH must be 0 or 1 (got: '${ENABLE_AUTH}')"
+  [[ "${ENABLE_JIBRI}" == 0 || "${ENABLE_JIBRI}" == 1 ]] \
+    || __die "ENABLE_JIBRI must be 0 or 1 (got: '${ENABLE_JIBRI}')"
+  [[ "${WRITE_NGINX_VHOST}" == 0 || "${WRITE_NGINX_VHOST}" == 1 ]] \
+    || __die "WRITE_NGINX_VHOST must be 0 or 1 (got: '${WRITE_NGINX_VHOST}')"
+  [[ -z "${INTERNAL_PROXY_IP}" ]] || __is_valid_ipv4 "${INTERNAL_PROXY_IP}" \
+    || __die "INTERNAL_PROXY_IP must be a valid IPv4 address (got: '${INTERNAL_PROXY_IP}')"
+
+  [[ "${PUBLIC_URL}" =~ ^https?://[^[:space:]/?#]+(/[^[:space:]?#]*)?$ ]] \
+    || __die "PUBLIC_URL must contain an http(s) URL with a valid host and optional path."
+  authority="${PUBLIC_URL#*://}"
+  authority="${authority%%/*}"
+  host="${authority%%:*}"
+  if [[ "${authority}" == *:* ]]; then
+    url_port="${authority##*:}"
+    [[ "${url_port}" =~ ^[0-9]{1,5}$ ]] \
+      || __die "PUBLIC_URL port must be a number from 1 to 65535."
+    (( 10#${url_port} >= 1 && 10#${url_port} <= 65535 )) \
+      || __die "PUBLIC_URL port must be a number from 1 to 65535."
+  fi
+  [[ "${host}" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$ || "${host}" =~ ^[A-Za-z0-9]$ ]] \
+    || __die "PUBLIC_URL host contains invalid characters."
+  [[ "${host}" != *..* && "${host}" != .* && "${host}" != *. ]] \
+    || __die "PUBLIC_URL host is malformed."
+  [[ "${PUBLIC_DOMAIN}" == "${host}" ]] \
+    || __die "PUBLIC_DOMAIN must match the host in PUBLIC_URL."
 }
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -413,7 +484,7 @@ __detect_pkg_mgr() {
 }
 
 __setup_docker_official() {
-  local PM
+  local PM repo_url
   PM="$(__detect_pkg_mgr)"
   __info "Installing Docker Engine using: ${PM}"
 
@@ -439,9 +510,14 @@ __setup_docker_official() {
     dnf -y install dnf-plugins-core curl
     . /etc/os-release
     case "${ID}" in
-      fedora) dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo ;;
-      *)      dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo ;;
+      fedora) repo_url="https://download.docker.com/linux/fedora/docker-ce.repo" ;;
+      *)      repo_url="https://download.docker.com/linux/centos/docker-ce.repo" ;;
     esac
+    if dnf config-manager addrepo --help >/dev/null 2>&1; then
+      dnf config-manager addrepo --from-repofile="${repo_url}"
+    else
+      dnf config-manager --add-repo "${repo_url}"
+    fi
     dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     ;;
   yum)
@@ -483,6 +559,21 @@ __ensure_docker() {
   fi
 }
 
+__ensure_jq() {
+  local PM
+  __need_cmd jq && return 0
+  PM="$(__detect_pkg_mgr)"
+  __info "Installing jq using: ${PM}"
+  case "${PM}" in
+    apt)     apt-get update && apt-get install -y jq ;;
+    dnf)     dnf -y install jq ;;
+    yum)     yum -y install jq ;;
+    zypper)  zypper -n install jq ;;
+    pacman)  pacman -Sy --noconfirm --needed jq ;;
+  esac
+  __need_cmd jq || __die "jq installation failed; cannot install operational scripts."
+}
+
 __docker_compose() {
   if docker compose version >/dev/null 2>&1; then
     docker compose -f "${COMPOSE_FILE}" "$@"
@@ -510,10 +601,15 @@ __ensure_env_key() {
 }
 
 __gen_env_file() {
-  [[ -f "${ENV_FILE}" ]] && { __info "Found existing .env (preserving)."; return; }
+  [[ ! -L "${ENV_FILE}" ]] || __die "Refusing to use a symlink for ${ENV_FILE}."
+  if [[ -f "${ENV_FILE}" ]]; then
+    chmod 600 "${ENV_FILE}"
+    __info "Found existing .env (preserving)."
+    return
+  fi
 
   __info "Creating default .env"
-  cat > "${ENV_FILE}" <<EOF
+  ( umask 077; cat > "${ENV_FILE}" <<EOF
 # Jitsi Meet Configuration
 # Re-run install.sh to safely update
 
@@ -620,6 +716,8 @@ NGINX_VHOST_DIR=${NGINX_VHOST_DIR}
 WRITE_NGINX_VHOST=${WRITE_NGINX_VHOST}
 NGINX_SSL_CERT_DIR=${NGINX_SSL_CERT_DIR}
 EOF
+  )
+  chmod 600 "${ENV_FILE}"
 }
 
 __ensure_all_env_keys() {
@@ -687,8 +785,7 @@ __ensure_all_env_keys() {
 }
 
 __fill_missing_secrets() {
-  # shellcheck source=/dev/null
-  . "${ENV_FILE}"
+  __load_existing_env
   local changed=0
 
   # Set a key in ENV_FILE to a value: replace in place if present, otherwise append.
@@ -738,6 +835,8 @@ __fill_missing_secrets() {
 }
 
 __write_compose() {
+  [[ -n "${INTERNAL_PROXY_IP}" ]] \
+    || __die "Could not detect INTERNAL_PROXY_IP; set it to a reachable host address for Docker containers."
   __backup_file "${COMPOSE_FILE}"
   __info "Writing docker-compose.yml"
 
@@ -748,15 +847,6 @@ services:
     image: ghcr.io/casjaysdevdocker/prosody:latest
     restart: unless-stopped
     pull_policy: always
-    ports:
-      # Prosody's internal web server (reverse proxy) entry point.
-      # Bound to INTERNAL_PROXY_IP:HTTP_PORT so the nginx frontend proxy and
-      # other containers on the same network can reach it; not 127.0.0.1 which
-      # would be invisible to containers even on the host network.
-      # prosody routes web, BOSH, XMPP-WS, and colibri-WS internally.
-      - "${INTERNAL_PROXY_IP}:${HTTP_PORT}:80"
-      # Ports 5222/5347/5280 are internal XMPP protocol ports — NOT exposed.
-      # All inter-service XMPP flows over the 'meet' Docker network.
     volumes:
       - $JITSI_CONFIG_DIR/prosody:/config:Z
     environment:
@@ -836,8 +926,9 @@ services:
     restart: unless-stopped
     pull_policy: always
     depends_on: [prosody, jicofo]
-    # No host port binding — prosody's internal web server routes to this
-    # container over the 'meet' Docker network (web:80).
+    ports:
+      # Publish the web frontend for the host reverse proxy.
+      - "${INTERNAL_PROXY_IP}:${HTTP_PORT}:80"
     volumes:
       - $JITSI_DATA_DIR/web:/config:Z
     environment:
@@ -974,8 +1065,7 @@ __wait_for_prosody() {
 }
 
 __register_admin_user() {
-  # shellcheck source=/dev/null
-  . "${ENV_FILE}"
+  __load_existing_env
   # Skip when auth is disabled: prosody has no internal_hashed store configured
   # and the register call would fail noisily without serving any purpose.
   if [[ "${ENABLE_AUTH:-0}" != "1" ]]; then
@@ -1002,6 +1092,27 @@ EOF
   __info "Credentials saved: ${CREDS_FILE}"
 }
 
+__apply_nginx_config() {
+  local _test_out
+  if _test_out="$(nginx -t 2>&1)"; then
+    if __need_cmd systemctl; then
+      if systemctl is-active --quiet nginx; then
+        systemctl reload nginx \
+          || __warn "Nginx configuration is valid but the running service could not be reloaded."
+      else
+        systemctl enable --now nginx \
+          || __warn "Nginx configuration is valid but the service could not be started."
+      fi
+    elif ! nginx -s reload 2>/dev/null; then
+      nginx 2>/dev/null \
+        || __warn "Nginx configuration is valid but the service could not be started."
+    fi
+  else
+    __warn "nginx config test failed — check ${NGINX_VHOST_FILE}"
+    __warn "${_test_out}"
+  fi
+}
+
 __write_nginx_vhost() {
   [[ "${WRITE_NGINX_VHOST}" == "1" ]] || return 0
   __need_cmd nginx || return 0
@@ -1013,7 +1124,10 @@ __write_nginx_vhost() {
   # Skip when the file already carries our sentinel on line 1
   if [[ -f "${NGINX_VHOST_FILE}" ]]; then
     read -r _first_line < "${NGINX_VHOST_FILE}" 2>/dev/null || true
-    [[ "${_first_line}" == "${_sentinel}" ]] && return 0
+    if [[ "${_first_line}" == "${_sentinel}" ]]; then
+      __apply_nginx_config
+      return 0
+    fi
   fi
 
   mkdir -p "${NGINX_VHOST_DIR}"
@@ -1110,18 +1224,11 @@ NGINX
     __warn "Verify this does not conflict with your existing nginx includes."
   fi
 
-  local _test_out
-  if _test_out="$(nginx -t 2>&1)"; then
-    systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || true
-  else
-    __warn "nginx config test failed — check ${NGINX_VHOST_FILE}"
-    __warn "${_test_out}"
-  fi
+  __apply_nginx_config
 }
 
 __post_summary() {
-  # shellcheck source=/dev/null
-  . "${ENV_FILE}"
+  __load_existing_env
 
   cat <<EOF
 
@@ -1130,8 +1237,7 @@ Jitsi Meet Installation Complete
 ============================================================
 Public URL:      ${PUBLIC_URL}
 Auth Enabled:    ${ENABLE_AUTH} (0=open, 1=required)
-Admin User:      ${ADMIN_USER}@${PUBLIC_DOMAIN}
-Credentials:     ${CREDS_FILE}
+$(if [[ "${ENABLE_AUTH}" == "1" ]]; then printf 'Admin User:      %s@%s\nCredentials:     %s\n' "${ADMIN_USER}" "${PUBLIC_DOMAIN}" "${CREDS_FILE}"; else printf 'Admin User:      not configured (auth disabled)\nCredentials:     not generated (auth disabled)\n'; fi)
 Jibri:           ${ENABLE_JIBRI:-0}
 Subdomain Rooms: ${ENABLE_SUBDOMAIN_ROOMS} (*.${PUBLIC_DOMAIN} -> room redirect)
 NGINX_VHOST_DIR: ${NGINX_VHOST_DIR}
@@ -1143,7 +1249,7 @@ Operational scripts installed to: /usr/local/bin
 
 NGINX VHOST
 ===========
-$(if __need_cmd nginx; then printf 'Written to: %s\n' "${NGINX_VHOST_FILE}"; printf 'See docs/reverse.md for Apache, Caddy, HAProxy, and Traefik examples.\n'; else printf 'nginx not found on this host — see docs/reverse.md for all proxy examples.\n'; printf 'When ready: set NGINX_VHOST_DIR and re-run install.sh, or copy from docs/.\n'; fi)
+$(if [[ "${WRITE_NGINX_VHOST}" != "1" ]]; then printf 'Skipped (WRITE_NGINX_VHOST=0).\n'; elif ! __need_cmd nginx; then printf 'nginx not found on this host — see docs/reverse.md for all proxy examples.\n'; printf 'When ready: set NGINX_VHOST_DIR and re-run install.sh, or copy from docs/.\n'; elif [[ -f "${NGINX_VHOST_FILE}" ]]; then printf 'Present at: %s\n' "${NGINX_VHOST_FILE}"; printf 'See docs/reverse.md for Apache, Caddy, HAProxy, and Traefik examples.\n'; else printf 'Not written: expected file is missing at %s\n' "${NGINX_VHOST_FILE}"; fi)
 
 FIREWALL: open UDP port 10000 for JVB media (audio/video RTP).
           If clients are behind restrictive firewalls, consider a TURN server.
@@ -1183,7 +1289,7 @@ Environment Variables:
   JITSI_BASE_DIR          Installation directory (default: /opt/jitsi)
   JITSI_TAG               Jitsi Docker image tag (default: unstable)
   TZ                      Timezone (default: auto-detected from host)
-  HTTP_PORT               Internal port for prosody (default: random 64000-64999)
+  HTTP_PORT               Host port for the web frontend (default: random 64000-64999)
   INTERNAL_PROXY_IP       Bind IP for internal HTTP_PORT (default: docker0 addr)
   NGINX_VHOST_DIR         nginx vhost directory (default: /etc/nginx/vhosts.d)
   NGINX_SSL_CERT_DIR      Letsencrypt cert dir (default: auto-detect for PUBLIC_DOMAIN)
@@ -1211,9 +1317,10 @@ __show_version() {
 
 __do_remove() {
   __require_root "$@"
+  local remove_dir
   # Safety: never run rm -rf on a short/blank/root-ish path.
-  # JITSI_BASE_DIR must be a real, absolute path at least 5 chars long
-  # and not equal to '/' or any top-level system directory.
+  # JITSI_BASE_DIR must be a real, absolute installation directory with a
+  # compose file, and may not resolve to '/' or a top-level system directory.
   case "${JITSI_BASE_DIR:-}" in
     ""|"/"|"/."|"/.."|"/root"|"/home"|"/etc"|"/usr"|"/var"|"/opt"|"/bin"|"/sbin"|"/lib"|"/lib64"|"/boot"|"/dev"|"/proc"|"/sys"|"/run"|"/srv"|"/tmp")
       __die "Refusing to remove unsafe JITSI_BASE_DIR='${JITSI_BASE_DIR:-}'"
@@ -1222,10 +1329,37 @@ __do_remove() {
   [[ "${JITSI_BASE_DIR}" = /* ]] || __die "JITSI_BASE_DIR must be an absolute path: '${JITSI_BASE_DIR}'"
   [[ ${#JITSI_BASE_DIR} -ge 5 ]] || __die "JITSI_BASE_DIR is too short to remove safely: '${JITSI_BASE_DIR}'"
   [[ -d "${JITSI_BASE_DIR}" ]] || __die "Not installed: ${JITSI_BASE_DIR}"
+  [[ ! -L "${JITSI_BASE_DIR}" ]] || __die "Refusing to remove a symlink installation directory: ${JITSI_BASE_DIR}"
+  remove_dir="$(cd -P -- "${JITSI_BASE_DIR}" 2>/dev/null && pwd -P)" \
+    || __die "Could not resolve installation directory: ${JITSI_BASE_DIR}"
+  case "${remove_dir}" in
+    "/"|"/root"|"/home"|"/etc"|"/usr"|"/var"|"/opt"|"/bin"|"/sbin"|"/lib"|"/lib64"|"/boot"|"/dev"|"/proc"|"/sys"|"/run"|"/srv"|"/tmp")
+      __die "Refusing to remove unsafe JITSI_BASE_DIR='${remove_dir}'"
+      ;;
+  esac
+  [[ -f "${remove_dir}/docker-compose.yml" ]] \
+    || __die "Not installed: ${JITSI_BASE_DIR} (docker-compose.yml is missing)"
+
+  # Read only the installer's allowlisted settings so its generated vhost can
+  # be identified and removed without sourcing the file as shell code.
+  if [[ -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]]; then
+    __load_existing_env
+  fi
 
   __info "Removing Jitsi..."
   [[ -f "${COMPOSE_FILE}" ]] && __docker_compose down --rmi all --volumes 2>/dev/null || true
-  rm -rf "${JITSI_BASE_DIR}"
+  if [[ -n "${PUBLIC_DOMAIN:-}" && -n "${NGINX_VHOST_DIR:-}" && -d "${NGINX_VHOST_DIR}" ]]; then
+    local sentinel="# nginx configuration for ${PUBLIC_DOMAIN}" vhost first_line
+    while IFS= read -r -d '' vhost; do
+      [[ ! -L "${vhost}" ]] || continue
+      IFS= read -r first_line < "${vhost}" || true
+      [[ "${first_line}" == "${sentinel}" ]] && unlink -- "${vhost}"
+    done < <(find "${NGINX_VHOST_DIR}" -maxdepth 1 -type f -name '*.conf' -print0)
+    if __need_cmd nginx && nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || true
+    fi
+  fi
+  rm -rf -- "${remove_dir}"
   __info "Jitsi removed."
   exit 0
 }
@@ -1237,6 +1371,12 @@ __do_remove() {
 __main() {
   __require_root "$@"
   __ensure_docker
+  __ensure_jq
+  if [[ -z "${INTERNAL_PROXY_IP}" ]]; then
+    INTERNAL_PROXY_IP="$(__detect_proxy_ip 2>/dev/null || true)"
+  fi
+  [[ -n "${INTERNAL_PROXY_IP}" ]] \
+    || __die "Could not detect INTERNAL_PROXY_IP; set it to a reachable host address for Docker containers."
   __check_jibri_prereqs
   __init_dirs
   __gen_env_file
@@ -1247,12 +1387,8 @@ __main() {
   __wait_for_prosody
   __register_admin_user
   __write_nginx_vhost
-  if __need_cmd jq; then
-    if ! __download_all_scripts_from_github /usr/local/bin; then
-      __warn "Failed to download operational scripts from GitHub — re-run install.sh once network access is restored."
-    fi
-  else
-    __warn "jq not found — skipping operational script install. Install jq and re-run to get meet-admin and jitsi-stack."
+  if ! __download_all_scripts_from_github /usr/local/bin; then
+    __warn "Failed to download operational scripts from GitHub — re-run install.sh once network access is restored."
   fi
   __post_summary
 }
@@ -1260,8 +1396,6 @@ __main() {
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # Script entry point
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-
-__init_config
 
 INSTALL_REMOVE_MODE=0
 
@@ -1280,10 +1414,13 @@ while true; do
   esac
 done
 
+__init_config
+
 [[ "${INSTALL_DEBUG}" == "1" ]] && set -x
 
 [[ "${INSTALL_REMOVE_MODE}" == "0" ]] && __load_existing_env
 [[ "${INSTALL_REMOVE_MODE}" == "1" ]] && __do_remove "$@"
+__validate_runtime_config
 
 __main "$@"
 
